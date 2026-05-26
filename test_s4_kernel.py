@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 from src.models.s4.s4_kernel import SSKernelDiag, SSKernelNPLR, discretize_zoh, cauchy_naive
-from src.models.hippo.hippo import hippo_init, legs_matrix
+from src.models.hippo.hippo import hippo_init, transition_legs
 
 def test_discretization():
     """test ssm discretization methods"""
@@ -46,9 +46,6 @@ def test_s4_diagonal():
     
     kernel = SSKernelDiag(d_model=d_model, d_state=d_state)
     
-    # initialize with hippo
-    hippo_init(kernel, measure='legs')
-    
     # generate convolution kernel
     K = kernel(L)
     
@@ -60,7 +57,7 @@ def test_s4_diagonal():
     # test step mode
     batch = 2
     u = torch.randn(batch, d_model)
-    state = torch.zeros(batch, d_model, d_state, dtype=torch.complex64)
+    state = kernel.default_state(batch, u.device)
     
     y, new_state = kernel.step(u, state)
     
@@ -78,9 +75,6 @@ def test_s4_nplr():
     
     kernel = SSKernelNPLR(d_model=d_model, d_state=d_state, rank=2)
     
-    # initialize with hippo
-    hippo_init(kernel, measure='legs')
-    
     # generate kernel
     K = kernel(L)
     
@@ -90,11 +84,9 @@ def test_s4_nplr():
     print(f"  kernel std: {K.std().item():.4f}")
     
     # test step mode
-    # nplr uses d_state//2 for actual state size due to conjugate symmetry
     batch = 2
     u = torch.randn(batch, d_model)
-    actual_state_size = kernel.Lambda_re.shape[1]  # get actual state dim
-    state = torch.zeros(batch, d_model, actual_state_size, dtype=torch.complex64)
+    state = kernel.default_state(batch, u.device)
     
     y, new_state = kernel.step(u, state)
     
@@ -106,23 +98,21 @@ def test_hippo_integration():
     """test hippo initialization with kernels"""
     print("testing hippo integration...")
     
-    # test with s4d
-    kernel = SSKernelDiag(d_model=8, d_state=32)
-    A, B = legs_matrix(N=32)
+    A, B = transition_legs(N=32)
     
     print(f"  hippo A shape: {A.shape}")
     print(f"  hippo B shape: {B.shape}")
     
-    hippo_init(kernel, measure='legs')
+    A_diag, B_diag, C_diag, _ = hippo_init(32, 8, kernel_type="diag")
     
-    print(f"  kernel Lambda_re: {kernel.Lambda_re.shape}")
-    print(f"  kernel Lambda_im: {kernel.Lambda_im.shape}")
-    print(f"  kernel B: {kernel.B.shape}")
+    print(f"  diag A shape: {A_diag.shape}")
+    print(f"  diag B shape: {B_diag.shape}")
+    print(f"  diag C shape: {C_diag.shape}")
     
     # check eigenvalues match
     eigenvals = np.linalg.eigvals(A)
     print(f"  hippo eigenvals (first 3): {eigenvals[:3]}")
-    print(f"  kernel Lambda (first 3): {(kernel.Lambda_re[0, :3] + 1j*kernel.Lambda_im[0, :3]).detach().numpy()}")
+    print(f"  diag A (first 3): {A_diag[0, :3].detach().numpy()}")
     print(" hippo integration works\n")
 
 def test_convolution():
@@ -136,7 +126,6 @@ def test_convolution():
     
     # create kernel
     kernel = SSKernelDiag(d_model=d_model, d_state=d_state)
-    hippo_init(kernel, measure='legs')
     
     # generate kernel
     K = kernel(seq_len)

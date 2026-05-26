@@ -9,10 +9,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 try:
-    from src.models.s4_model import S4ProteinModel
+    from src.models.s4_model import S4ProteinModel, adapt_state_dict_vocab
     from src.dataloaders.protein import ProteinDataset, ProteinTokenizer, create_dataloader
 except ImportError:
-    from models.s4_model import S4ProteinModel
+    from models.s4_model import S4ProteinModel, adapt_state_dict_vocab
     from dataloaders.protein import ProteinDataset, ProteinTokenizer, create_dataloader
 
 
@@ -22,7 +22,13 @@ def parse_args():
                    help="Path to training FASTA (plain or .gz; UniRef50 only)")
     p.add_argument("--val_fasta", type=str, default=None, help="Validation FASTA (optional; use split or holdout from same file)")
     p.add_argument("--l_max", type=int, default=1024)
+    p.add_argument("--objective", type=str, default="autocomplete", choices=["autocomplete", "masked"],
+                   help="Training objective: prefix autocomplete or legacy masked LM")
     p.add_argument("--mask_prob", type=float, default=0.15)
+    p.add_argument("--prefix_length", type=int, default=None,
+                   help="Fixed autocomplete prefix length. If omitted, use random prefix fractions.")
+    p.add_argument("--prefix_min_fraction", type=float, default=0.25)
+    p.add_argument("--prefix_max_fraction", type=float, default=0.70)
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -34,6 +40,10 @@ def parse_args():
     p.add_argument("--d_state", type=int, default=64)
     p.add_argument("--n_layers", type=int, default=6)
     p.add_argument("--kernel_type", type=str, default="diag", choices=["diag", "nplr"])
+    p.add_argument("--bidirectional", dest="bidirectional", action="store_true", default=None,
+                   help="Force bidirectional S4 blocks")
+    p.add_argument("--unidirectional", dest="bidirectional", action="store_false",
+                   help="Force unidirectional S4 blocks")
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--model_size", type=str, default=None, choices=["small", "base", "large"],
                    help="Override with preset small/base/large")
@@ -48,6 +58,24 @@ def parse_args():
                    help="Maximum number of sequences to load (for memory-limited systems). "
                         "E.g., --max_sequences 1000000 for 1M sequences. None = load all.")
     return p.parse_args()
+
+
+def unpack_batch(batch, device):
+    if len(batch) == 3:
+        input_ids, target_ids, attention_mask = batch
+        loss_mask = None
+    elif len(batch) == 4:
+        input_ids, target_ids, attention_mask, loss_mask = batch
+        loss_mask = loss_mask.to(device)
+    else:
+        raise ValueError(f"Expected 3 or 4 tensors per batch, got {len(batch)}")
+
+    return (
+        input_ids.to(device),
+        target_ids.to(device),
+        attention_mask.to(device),
+        loss_mask,
+    )
 
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
@@ -65,15 +93,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
     n_batches = 0
     pbar = tqdm(loader, desc="Train")
     
-    for step, (input_ids, target_ids, attention_mask) in enumerate(pbar):
-        input_ids = input_ids.to(device)
-        target_ids = target_ids.to(device)
-        attention_mask = attention_mask.to(device)
+    for step, batch in enumerate(pbar):
+        input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
 
         # Mixed precision: only for CUDA
         if use_amp and device.type == "cuda":
             with torch.cuda.amp.autocast():
-                loss = model.compute_loss(input_ids, target_ids, attention_mask)
+                loss = model.compute_loss(
+                    input_ids, target_ids, attention_mask,
+                    loss_mask=loss_mask, objective=args.objective,
+                )
                 if args.grad_accum_steps > 1:
                     loss = loss / args.grad_accum_steps
             scaler.scale(loss).backward()
@@ -89,7 +118,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
                 global_step += 1
         else:
             # MPS or CPU: no mixed precision
-            loss = model.compute_loss(input_ids, target_ids, attention_mask)
+            loss = model.compute_loss(
+                input_ids, target_ids, attention_mask,
+                loss_mask=loss_mask, objective=args.objective,
+            )
             if args.grad_accum_steps > 1:
                 loss = loss / args.grad_accum_steps
             loss.backward()
@@ -114,11 +146,12 @@ def validate(model, loader, device):
     model.eval()
     total_loss = 0.0
     n = 0
-    for input_ids, target_ids, attention_mask in tqdm(loader, desc="Val"):
-        input_ids = input_ids.to(device)
-        target_ids = target_ids.to(device)
-        attention_mask = attention_mask.to(device)
-        loss = model.compute_loss(input_ids, target_ids, attention_mask)
+    for batch in tqdm(loader, desc="Val"):
+        input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
+        loss = model.compute_loss(
+            input_ids, target_ids, attention_mask,
+            loss_mask=loss_mask, objective=args.objective,
+        )
         total_loss += loss.item()
         n += 1
     return total_loss / max(n, 1)
@@ -139,12 +172,22 @@ def main():
     device = get_device()
 
     tokenizer = ProteinTokenizer()
+    bidirectional = args.bidirectional
+    if bidirectional is None:
+        bidirectional = args.objective == "masked"
     
     print(f"🚀 Starting training...")
     print(f"   Device: {device}")
     print(f"   FASTA: {args.fasta_file}")
+    print(f"   Objective: {args.objective}")
+    print(f"   Bidirectional: {bidirectional}")
     if args.max_sequences:
         print(f"   Max sequences: {args.max_sequences:,}")
+    if args.objective == "autocomplete":
+        if args.prefix_length:
+            print(f"   Prefix length: {args.prefix_length}")
+        else:
+            print(f"   Prefix fraction: {args.prefix_min_fraction:.2f}-{args.prefix_max_fraction:.2f}")
     print()
     
     train_dataset = ProteinDataset(
@@ -152,6 +195,10 @@ def main():
         tokenizer=tokenizer,
         l_max=args.l_max,
         mask_prob=args.mask_prob,
+        objective=args.objective,
+        prefix_length=args.prefix_length,
+        prefix_min_fraction=args.prefix_min_fraction,
+        prefix_max_fraction=args.prefix_max_fraction,
         cache_dir=args.cache_dir,
         max_sequences=args.max_sequences,
     )
@@ -170,6 +217,10 @@ def main():
             tokenizer=tokenizer,
             l_max=args.l_max,
             mask_prob=args.mask_prob,
+            objective=args.objective,
+            prefix_length=args.prefix_length,
+            prefix_min_fraction=args.prefix_min_fraction,
+            prefix_max_fraction=args.prefix_max_fraction,
             cache_dir=args.cache_dir,
         )
         val_loader = DataLoader(
@@ -185,6 +236,8 @@ def main():
             vocab_size=tokenizer.vocab_size,
             dropout=args.dropout,
             kernel_type=args.kernel_type,
+            bidirectional=bidirectional,
+            eos_token_id=tokenizer.eos_token_id,
         )
     else:
         model = S4ProteinModel(
@@ -194,6 +247,8 @@ def main():
             n_layers=args.n_layers,
             dropout=args.dropout,
             kernel_type=args.kernel_type,
+            bidirectional=bidirectional,
+            eos_token_id=tokenizer.eos_token_id,
         )
     model = model.to(device)
 
@@ -211,11 +266,23 @@ def main():
     best_val_loss = float("inf")
     if args.resume and os.path.exists(args.resume):
         ckpt = torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt.get("model_state_dict", ckpt))
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
-        if "scheduler" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler"])
+        raw_state = ckpt.get("model_state_dict", ckpt)
+        checkpoint_vocab_size = raw_state["embed.weight"].shape[0]
+        state = adapt_state_dict_vocab(raw_state, model.vocab_size)
+        model.load_state_dict(state, strict=False)
+        can_load_optimizer = checkpoint_vocab_size == model.vocab_size
+        if "optimizer" in ckpt and can_load_optimizer:
+            try:
+                optimizer.load_state_dict(ckpt["optimizer"])
+            except ValueError:
+                print("Skipping optimizer state because checkpoint tensor shapes changed.")
+        elif "optimizer" in ckpt:
+            print("Skipping optimizer state because checkpoint vocab size changed.")
+        if "scheduler" in ckpt and can_load_optimizer:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler"])
+            except ValueError:
+                print("Skipping scheduler state because checkpoint tensor shapes changed.")
         start_epoch = ckpt.get("epoch", 0) + 1
         global_step = ckpt.get("global_step", 0)
         best_val_loss = ckpt.get("best_val_loss", best_val_loss)
@@ -251,6 +318,16 @@ def main():
             "epoch": epoch,
             "global_step": global_step,
             "best_val_loss": best_val_loss,
+            "objective": args.objective,
+            "bidirectional": bidirectional,
+            "model_config": {
+                "vocab_size": tokenizer.vocab_size,
+                "d_model": model.d_model,
+                "d_state": model.d_state,
+                "n_layers": model.n_layers,
+                "kernel_type": model.kernel_type,
+                "eos_token_id": tokenizer.eos_token_id,
+            },
         }
         torch.save(save, os.path.join(args.output_dir, "last.pt"))
 

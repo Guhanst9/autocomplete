@@ -22,6 +22,17 @@ def cauchy_naive(v: torch.Tensor, z: torch.Tensor, w: torch.Tensor) -> torch.Ten
     return torch.sum(cauchy, dim=-2)
 
 
+def discretize_zoh(
+    Lambda: torch.Tensor,
+    B: torch.Tensor,
+    Delta: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Zero-order hold discretization for diagonal state matrices."""
+    Lambda_bar = torch.exp(Delta * Lambda)
+    B_bar = (Lambda_bar - 1.0) / Lambda * B
+    return Lambda_bar, B_bar
+
+
 def log_vandermonde_naive(v: torch.Tensor, x: torch.Tensor, L: int) -> torch.Tensor:
     """v: (..., N), x: (..., N) -> (..., L)"""
     ar = torch.arange(L, device=x.device, dtype=x.dtype)

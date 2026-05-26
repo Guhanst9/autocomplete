@@ -3,7 +3,7 @@ import os
 import random
 import mmap
 import struct
-from typing import List, Tuple, Optional, Iterator
+from typing import List, Tuple, Optional, Iterator, Union
 
 import torch
 from torch.utils.data import Dataset, DataLoader, IterableDataset
@@ -21,14 +21,20 @@ class ProteinTokenizer:
         self.pad_token = '<PAD>'
         self.mask_token = '<MASK>'
         self.unk_token = '<UNK>'
+        self.eos_token = '<EOS>'
         
         # build vocab
         self.vocab = {self.pad_token: 0, self.mask_token: 1, self.unk_token: 2}
         for i, aa in enumerate(self.amino_acids):
             self.vocab[aa] = i + 3
+        self.vocab[self.eos_token] = len(self.vocab)
         
         self.idx_to_token = {v: k for k, v in self.vocab.items()}
         self.vocab_size = len(self.vocab)
+        self.pad_token_id = self.vocab[self.pad_token]
+        self.mask_token_id = self.vocab[self.mask_token]
+        self.unk_token_id = self.vocab[self.unk_token]
+        self.eos_token_id = self.vocab[self.eos_token]
     
     def encode(self, sequence: str) -> List[int]:
         """encode amino acid sequence to token ids"""
@@ -40,9 +46,19 @@ class ProteinTokenizer:
                 tokens.append(self.vocab[self.unk_token])
         return tokens
     
-    def decode(self, token_ids: List[int]) -> str:
+    def decode(self, token_ids: List[int], stop_at_eos: bool = True) -> str:
         """decode token ids to amino acid sequence"""
-        return ''.join([self.idx_to_token[idx] for idx in token_ids if idx != self.vocab[self.pad_token]])
+        tokens = []
+        for idx in token_ids:
+            idx = int(idx)
+            if idx == self.pad_token_id:
+                continue
+            if idx == self.eos_token_id and stop_at_eos:
+                break
+            if idx == self.eos_token_id:
+                continue
+            tokens.append(self.idx_to_token.get(idx, self.unk_token))
+        return ''.join(tokens)
 
 
 def _get_file_size(fasta_file: str) -> int:
@@ -142,6 +158,10 @@ class ProteinDataset(Dataset):
         tokenizer: Optional tokenizer (creates default if None)
         l_max: Maximum sequence length
         mask_prob: Masking probability for MLM
+        objective: "masked" for MLM or "autocomplete" for prefix-to-suffix LM
+        prefix_length: Fixed prefix length for autocomplete, or None for random
+        prefix_min_fraction: Minimum random prefix fraction for autocomplete
+        prefix_max_fraction: Maximum random prefix fraction for autocomplete
         cache_dir: Directory to cache processed sequences
         max_sequences: Maximum number of sequences to load (None = all)
                       Use this to limit memory usage for large datasets
@@ -153,13 +173,26 @@ class ProteinDataset(Dataset):
         tokenizer: Optional[ProteinTokenizer] = None,
         l_max: int = 1024,
         mask_prob: float = 0.15,
+        objective: str = "masked",
+        prefix_length: Optional[int] = None,
+        prefix_min_fraction: float = 0.25,
+        prefix_max_fraction: float = 0.70,
         cache_dir: Optional[str] = None,
         max_sequences: Optional[int] = None,
     ):
         self.fasta_file = fasta_file
         self.l_max = l_max
         self.mask_prob = mask_prob
+        self.objective = objective
+        self.prefix_length = prefix_length
+        self.prefix_min_fraction = prefix_min_fraction
+        self.prefix_max_fraction = prefix_max_fraction
         self.max_sequences = max_sequences
+
+        if self.objective not in {"masked", "autocomplete"}:
+            raise ValueError("objective must be 'masked' or 'autocomplete'")
+        if not 0 < self.prefix_min_fraction <= self.prefix_max_fraction <= 1:
+            raise ValueError("prefix fractions must satisfy 0 < min <= max <= 1")
         
         if tokenizer is None:
             self.tokenizer = ProteinTokenizer()
@@ -233,16 +266,37 @@ class ProteinDataset(Dataset):
     def __len__(self) -> int:
         return len(self.sequences)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """return (input_ids, target_ids, attention_mask)"""
+    def __getitem__(self, idx: int) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        """return tensors for the requested training objective"""
+        if self.objective == "autocomplete":
+            return self._getitem_autocomplete(idx)
+        return self._getitem_masked(idx)
+
+    def _pad(self, tokens: List[int]) -> List[int]:
+        if len(tokens) < self.l_max:
+            return tokens + [self.tokenizer.pad_token_id] * (self.l_max - len(tokens))
+        return tokens[:self.l_max]
+
+    def _sample_prefix_length(self, amino_len: int) -> int:
+        if self.prefix_length is not None:
+            return min(max(1, self.prefix_length), amino_len)
+
+        min_prefix = max(1, int(round(amino_len * self.prefix_min_fraction)))
+        max_prefix = max(min_prefix, int(round(amino_len * self.prefix_max_fraction)))
+        max_prefix = min(max_prefix, amino_len)
+        return random.randint(min_prefix, max_prefix)
+
+    def _getitem_masked(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """return (input_ids, target_ids, attention_mask) for masked LM"""
         sequence = self.sequences[idx].copy()
         seq_len = len(sequence)
         
         # pad or truncate to l_max
-        if seq_len < self.l_max:
-            padded = sequence + [self.tokenizer.vocab[self.tokenizer.pad_token]] * (self.l_max - seq_len)
-        else:
-            padded = sequence[:self.l_max]
+        padded = self._pad(sequence)
+        seq_len = min(seq_len, self.l_max)
         
         # create input and target
         input_ids = padded.copy()
@@ -252,11 +306,14 @@ class ProteinDataset(Dataset):
         # apply masking: 80% [MASK], 10% random, 10% unchanged
         num_mask = max(1, int(seq_len * self.mask_prob))
         mask_positions = random.sample(range(seq_len), min(num_mask, seq_len))
-        valid_vocab = [i for i in range(self.tokenizer.vocab_size) if i != self.tokenizer.vocab[self.tokenizer.pad_token]]
+        valid_vocab = [
+            i for i in range(self.tokenizer.vocab_size)
+            if i not in {self.tokenizer.pad_token_id, self.tokenizer.eos_token_id}
+        ]
         for pos in mask_positions:
             r = random.random()
             if r < 0.8:
-                input_ids[pos] = self.tokenizer.vocab[self.tokenizer.mask_token]
+                input_ids[pos] = self.tokenizer.mask_token_id
             elif r < 0.9:
                 input_ids[pos] = random.choice(valid_vocab)
             # else 10% unchanged
@@ -267,16 +324,52 @@ class ProteinDataset(Dataset):
             torch.tensor(attention_mask, dtype=torch.long),
         )
 
+    def _getitem_autocomplete(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """return (input_ids, next_token_targets, attention_mask, loss_mask)."""
+        sequence = self.sequences[idx].copy()
+        if self.l_max < 2:
+            raise ValueError("l_max must be at least 2 for autocomplete training")
+
+        # Reserve one slot for EOS so the model can learn when to stop.
+        sequence = sequence[: self.l_max - 1]
+        amino_len = max(1, len(sequence))
+        tokens = sequence + [self.tokenizer.eos_token_id]
+        seq_len = len(tokens)
+        prefix_len = self._sample_prefix_length(amino_len)
+
+        input_ids = self._pad(tokens)
+        target_ids = self._pad(tokens[1:] + [self.tokenizer.pad_token_id])
+        attention_mask = [1] * seq_len + [0] * (self.l_max - seq_len)
+
+        # Position i predicts token i+1, so prefix_len amino acids make the
+        # first graded suffix prediction at position prefix_len - 1.
+        loss_mask = [0] * self.l_max
+        start = max(0, prefix_len - 1)
+        for pos in range(start, seq_len - 1):
+            loss_mask[pos] = 1
+
+        return (
+            torch.tensor(input_ids, dtype=torch.long),
+            torch.tensor(target_ids, dtype=torch.long),
+            torch.tensor(attention_mask, dtype=torch.long),
+            torch.tensor(loss_mask, dtype=torch.long),
+        )
+
 
 def create_dataloader(
     fasta_file: str,
     tokenizer: Optional[ProteinTokenizer] = None,
     l_max: int = 1024,
     mask_prob: float = 0.15,
+    objective: str = "masked",
+    prefix_length: Optional[int] = None,
+    prefix_min_fraction: float = 0.25,
+    prefix_max_fraction: float = 0.70,
     batch_size: int = 32,
     shuffle: bool = True,
     num_workers: int = 4,
     cache_dir: Optional[str] = None,
+    max_sequences: Optional[int] = None,
 ) -> DataLoader:
     """create dataloader for protein sequences"""
     dataset = ProteinDataset(
@@ -284,7 +377,12 @@ def create_dataloader(
         tokenizer=tokenizer,
         l_max=l_max,
         mask_prob=mask_prob,
+        objective=objective,
+        prefix_length=prefix_length,
+        prefix_min_fraction=prefix_min_fraction,
+        prefix_max_fraction=prefix_max_fraction,
         cache_dir=cache_dir,
+        max_sequences=max_sequences,
     )
     
     return DataLoader(
