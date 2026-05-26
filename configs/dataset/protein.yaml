@@ -1,6 +1,5 @@
-# dataset configuration for protein sequences
-_target_: src.dataloaders.protein.ProteinDataset
-fasta_file: "data/protein/train.fasta" 
-l_max: 1024  # max sequence length
-cache_dir: null  # directory for caching processed data
-n_workers: 4  # dataloader workers
+fasta_file: data/protein/uniref50.fasta.gz
+val_fasta: null
+l_max: 1024
+mask_prob: 0.15
+cache_dir: null

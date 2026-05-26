@@ -1,0 +1,9 @@
+_model_: src.models.s4_model.S4ProteinModel
+vocab_size: 23
+d_model: 256
+d_state: 64
+n_layers: 6
+dropout: 0.1
+kernel_type: diag
+bidirectional: true
+l_max: 1024

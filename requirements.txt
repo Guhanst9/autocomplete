@@ -1,0 +1,9 @@
+torch>=2.0.0
+numpy
+omegaconf
+tqdm
+biopython
+# optional: hydra-core for configs
+hydra-core>=1.2.0
+# optional: wandb for logging
+wandb
