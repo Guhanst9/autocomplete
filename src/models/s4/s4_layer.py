@@ -1,6 +1,3 @@
-"""
-S4 Layer and Block: pre-norm, FFT convolution, residual, optional bidirectional.
-"""
 from typing import Optional, Tuple
 
 import torch
@@ -13,11 +10,6 @@ except ImportError:
 
 
 def fft_conv(u: torch.Tensor, K: torch.Tensor, dropout_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """
-    FFT-based convolution.
-    u: (batch, d_model, seq_len)
-    K: (d_model, seq_len) or (d_model, L) with L >= seq_len
-    """
     L = u.shape[-1]
     if K.shape[-1] < L:
         K = torch.nn.functional.pad(K, (0, L - K.shape[-1]))
@@ -33,11 +25,6 @@ def fft_conv(u: torch.Tensor, K: torch.Tensor, dropout_mask: Optional[torch.Tens
 
 
 class S4Layer(nn.Module):
-    """
-    Single S4 layer: LayerNorm -> S4 kernel (FFT conv or step) -> dropout -> residual.
-    Supports both convolution mode (training) and recurrent step mode (inference).
-    """
-
     def __init__(
         self,
         d_model: int,
@@ -68,12 +55,6 @@ class S4Layer(nn.Module):
         state: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Convolution mode for parallel training.
-        x: (batch, seq_len, d_model)
-        attention_mask: (batch, seq_len), 1 for valid, 0 for pad
-        Returns: (batch, seq_len, d_model), state
-        """
         residual = x
         x = self.norm(x)
         B, L, H = x.shape
@@ -103,47 +84,30 @@ class S4Layer(nn.Module):
         x: torch.Tensor,
         state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Recurrent step mode for autoregressive inference (O(1) per token).
-        x: (batch, d_model) - single token embedding
-        state: (batch, d_model, d_state//2) - recurrent state
-        Returns: (batch, d_model), new_state
-        """
+        # recurrent path used for autoregressive generation
         B, H = x.shape
         device = x.device
         
-        # Initialize state if None
         if state is None:
             state = self.kernel.default_state(B, device)
         
-        # Apply layer norm
         x_norm = self.norm(x)
         
-        # Recurrent step through kernel
         y, new_state = self.kernel.step(x_norm, state)
         
-        # Add skip connection (D term)
         y = y + x_norm * self.D_skip
         
-        # Apply dropout (only in training)
         y = self.dropout(y)
         
-        # Residual connection
         out = y + x
         
         return out, new_state
 
     def default_state(self, batch: int, device: torch.device) -> torch.Tensor:
-        """Get default initial state for recurrent mode."""
         return self.kernel.default_state(batch, device)
 
 
 class S4Block(nn.Module):
-    """
-    Full S4 block: S4Layer -> LayerNorm -> MLP -> residual.
-    Supports both convolution mode (training) and recurrent step mode (inference).
-    """
-
     def __init__(
         self,
         d_model: int,
@@ -180,7 +144,6 @@ class S4Block(nn.Module):
         state: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Convolution mode for parallel training."""
         x, new_state = self.s4_layer(x, state=state, attention_mask=attention_mask)
         residual = x
         x = self.norm2(x)
@@ -194,16 +157,8 @@ class S4Block(nn.Module):
         x: torch.Tensor,
         state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Recurrent step mode for autoregressive inference (O(1) per token).
-        x: (batch, d_model) - single token embedding
-        state: recurrent state from S4Layer
-        Returns: (batch, d_model), new_state
-        """
-        # S4 layer step
         x, new_state = self.s4_layer.step(x, state)
         
-        # MLP with residual
         residual = x
         x = self.norm2(x)
         x = self.mlp(x) + residual
@@ -211,5 +166,4 @@ class S4Block(nn.Module):
         return x, new_state
 
     def default_state(self, batch: int, device: torch.device) -> torch.Tensor:
-        """Get default initial state for recurrent mode."""
         return self.s4_layer.default_state(batch, device)

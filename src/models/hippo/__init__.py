@@ -1,5 +1,3 @@
-"""HiPPO package"""
+from .hippo import hippo_init, nplr_legs, transition_legs
 
-from .hippo import transition, legs_matrix, nplr, hippo_init
-
-__all__ = ['transition', 'legs_matrix', 'nplr', 'hippo_init']
+__all__ = ["transition_legs", "nplr_legs", "hippo_init"]

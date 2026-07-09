@@ -1,14 +1,12 @@
-"""test s4 kernel implementations"""
 import torch
 import numpy as np
 from src.models.s4.s4_kernel import SSKernelDiag, SSKernelNPLR, discretize_zoh, cauchy_naive
+from src.models.s4.s4_layer import S4Layer
 from src.models.hippo.hippo import hippo_init, transition_legs
 
 def test_discretization():
-    """test ssm discretization methods"""
     print("testing discretization...")
     
-    # simple test case
     Lambda = torch.tensor([[-1.0 + 1j], [-2.0 + 0.5j]])
     B = torch.tensor([[1.0], [0.5]])
     Delta = torch.tensor([0.1, 0.1]).unsqueeze(-1)
@@ -21,10 +19,8 @@ def test_discretization():
     print("discretization works\n")
 
 def test_cauchy_kernel():
-    """test cauchy kernel computation"""
     print("testing cauchy kernel...")
     
-    # simple test
     v = torch.randn(8, dtype=torch.complex64)
     z = torch.randn(16, dtype=torch.complex64)
     w = torch.randn(8, dtype=torch.complex64)
@@ -37,7 +33,6 @@ def test_cauchy_kernel():
     print("cauchy kernel works\n")
 
 def test_s4_diagonal():
-    """test s4 diagonal kernel"""
     print("testing s4d kernel...")
     
     d_model = 4
@@ -46,7 +41,6 @@ def test_s4_diagonal():
     
     kernel = SSKernelDiag(d_model=d_model, d_state=d_state)
     
-    # generate convolution kernel
     K = kernel(L)
     
     print(f"  kernel shape: {K.shape}")
@@ -54,7 +48,6 @@ def test_s4_diagonal():
     print(f"  kernel mean: {K.mean().item():.4f}")
     print(f"  kernel std: {K.std().item():.4f}")
     
-    # test step mode
     batch = 2
     u = torch.randn(batch, d_model)
     state = kernel.default_state(batch, u.device)
@@ -66,7 +59,6 @@ def test_s4_diagonal():
     print("s4d kernel works\n")
 
 def test_s4_nplr():
-    """test s4 nplr kernel"""
     print("testing s4 nplr kernel...")
     
     d_model = 4
@@ -75,7 +67,6 @@ def test_s4_nplr():
     
     kernel = SSKernelNPLR(d_model=d_model, d_state=d_state, rank=2)
     
-    # generate kernel
     K = kernel(L)
     
     print(f"  kernel shape: {K.shape}")
@@ -83,7 +74,6 @@ def test_s4_nplr():
     print(f"  kernel mean: {K.mean().item():.4f}")
     print(f"  kernel std: {K.std().item():.4f}")
     
-    # test step mode
     batch = 2
     u = torch.randn(batch, d_model)
     state = kernel.default_state(batch, u.device)
@@ -95,7 +85,6 @@ def test_s4_nplr():
     print(" s4 nplr kernel works\n")
 
 def test_hippo_integration():
-    """test hippo initialization with kernels"""
     print("testing hippo integration...")
     
     A, B = transition_legs(N=32)
@@ -109,14 +98,12 @@ def test_hippo_integration():
     print(f"  diag B shape: {B_diag.shape}")
     print(f"  diag C shape: {C_diag.shape}")
     
-    # check eigenvalues match
     eigenvals = np.linalg.eigvals(A)
     print(f"  hippo eigenvals (first 3): {eigenvals[:3]}")
     print(f"  diag A (first 3): {A_diag[0, :3].detach().numpy()}")
     print(" hippo integration works\n")
 
 def test_convolution():
-    """test that convolution mode produces reasonable output"""
     print("testing convolution with real data...")
     
     d_model = 8
@@ -124,16 +111,12 @@ def test_convolution():
     batch = 2
     seq_len = 128
     
-    # create kernel
     kernel = SSKernelDiag(d_model=d_model, d_state=d_state)
     
-    # generate kernel
     K = kernel(seq_len)
     
-    # create input
     u = torch.randn(batch, d_model, seq_len)
     
-    # convolve using fft
     u_f = torch.fft.rfft(u, n=2*seq_len, dim=-1)
     K_f = torch.fft.rfft(K, n=2*seq_len, dim=-1)
     y_f = u_f * K_f
@@ -146,6 +129,35 @@ def test_convolution():
     print(f"  output std: {y.std().item():.4f}")
     print(" convolution produces valid output\n")
 
+def test_layer_step_matches_convolution():
+    print("testing recurrent step matches convolution...")
+
+    for kernel_type in ("diag", "nplr"):
+        torch.manual_seed(0)
+        layer = S4Layer(
+            d_model=4,
+            d_state=16,
+            dropout=0.0,
+            kernel_type=kernel_type,
+            bidirectional=False,
+        )
+        layer.eval()
+
+        x = torch.randn(2, 12, 4)
+        y_conv, _ = layer(x)
+
+        state = layer.default_state(x.shape[0], x.device)
+        ys = []
+        for t in range(x.shape[1]):
+            y_step, state = layer.step(x[:, t], state)
+            ys.append(y_step)
+        y_step = torch.stack(ys, dim=1)
+
+        max_diff = (y_conv - y_step).abs().max().item()
+        print(f"  {kernel_type} max abs diff: {max_diff:.8f}")
+        assert torch.allclose(y_conv, y_step, atol=1e-5, rtol=1e-5)
+    print(" recurrent step matches convolution\n")
+
 if __name__ == "__main__":
     print("S4 Kernel Implementation Tests \n")
 
@@ -156,5 +168,6 @@ if __name__ == "__main__":
     test_s4_nplr()
     test_hippo_integration()
     test_convolution()
+    test_layer_step_matches_convolution()
     
     print("All tests passed! ")

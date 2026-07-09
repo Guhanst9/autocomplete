@@ -1,7 +1,3 @@
-"""
-S4 kernel layers: SSKernelDiag (S4D) and SSKernelNPLR.
-Supports convolution mode (training) and step mode (inference).
-"""
 import math
 from typing import Optional, Tuple
 
@@ -15,7 +11,6 @@ except ImportError:
 
 
 def cauchy_naive(v: torch.Tensor, z: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """v: (..., N), z: (..., L), w: (..., N) -> (..., L)"""
     v = torch.cat([v, v.conj()], dim=-1)
     w = torch.cat([w, w.conj()], dim=-1)
     cauchy = v.unsqueeze(-1) / (z.unsqueeze(-2) - w.unsqueeze(-1))
@@ -27,24 +22,18 @@ def discretize_zoh(
     B: torch.Tensor,
     Delta: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Zero-order hold discretization for diagonal state matrices."""
     Lambda_bar = torch.exp(Delta * Lambda)
     B_bar = (Lambda_bar - 1.0) / Lambda * B
     return Lambda_bar, B_bar
 
 
 def log_vandermonde_naive(v: torch.Tensor, x: torch.Tensor, L: int) -> torch.Tensor:
-    """v: (..., N), x: (..., N) -> (..., L)"""
     ar = torch.arange(L, device=x.device, dtype=x.dtype)
     vm = torch.exp(x.unsqueeze(-1) * ar)
     return 2 * (v * vm).sum(dim=-2).real
 
 
 class SSKernelDiag(nn.Module):
-    """
-    S4D diagonal kernel. forward(L) returns convolution kernel; step(u, state) for recurrent.
-    """
-
     def __init__(
         self,
         d_model: int,
@@ -63,7 +52,7 @@ class SSKernelDiag(nn.Module):
         log_dt = torch.rand(d_model) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
         self.log_dt = nn.Parameter(log_dt)
 
-        # A = -exp(log_A_real) + 1j * pi * arange (HiPPO-style)
+        # hippo-style diagonal spectrum
         log_A_real = torch.log(0.5 * torch.ones(d_model, N_half))
         self.log_A_real = nn.Parameter(log_A_real)
         ar = torch.arange(N_half, dtype=torch.float).unsqueeze(0).expand(d_model, -1)
@@ -73,6 +62,7 @@ class SSKernelDiag(nn.Module):
         self.C_re = nn.Parameter(C.real)
         self.C_im = nn.Parameter(C.imag)
 
+        # kept for old checkpoints; s4layer owns the active skip term
         self.D = nn.Parameter(torch.randn(d_model) * 0.01)
 
     def _get_params(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -82,7 +72,6 @@ class SSKernelDiag(nn.Module):
         return dt, A, C
 
     def forward(self, L: int) -> torch.Tensor:
-        """Return kernel K: (H, L) for FFT convolution."""
         dt, A, C = self._get_params()
         dA = dt * A
         K = (torch.exp(dA) - 1.0) / A * C
@@ -98,15 +87,12 @@ class SSKernelDiag(nn.Module):
         B_d = (torch.exp(dt * A) - 1.0) / A * B
         return A_d, B_d, C
 
-
     def step(self, u: torch.Tensor, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # structured parameters derived from the kernel
         A_d, B_d, C = self._step_params()
         Bu = B_d * u.unsqueeze(-1)
-        # hidden state updated on each input token
+        # recurrent state update used during generation
         new_state = A_d * state + Bu
-        # runs per token — o(1) memory at inference
-        y = (C * new_state).sum(dim=-1).real + self.D * u
+        y = 2 * (C * new_state).sum(dim=-1).real
         return y, new_state
 
     def default_state(self, batch: int, device: torch.device) -> torch.Tensor:
@@ -114,10 +100,6 @@ class SSKernelDiag(nn.Module):
 
 
 class SSKernelNPLR(nn.Module):
-    """
-    S4 NPLR (normal-plus-low-rank) kernel. Uses Cauchy kernel for convolution.
-    """
-
     def __init__(
         self,
         d_model: int,
@@ -146,20 +128,18 @@ class SSKernelNPLR(nn.Module):
         C = torch.randn(d_model, N_half, dtype=torch.cfloat)
         self.C_re = nn.Parameter(C.real)
         self.C_im = nn.Parameter(C.imag)
+        # kept for old checkpoints; s4layer owns the active skip term
         self.D = nn.Parameter(torch.randn(d_model) * 0.01)
 
     def forward(self, L: int) -> torch.Tensor:
-        # compute time step from learned log scale
         dt = torch.exp(self.log_dt).unsqueeze(-1)
         A = self.A
+        B = self.B
         C = self.C_re + 1j * self.C_im
-        # discretize continuous-time state space
         dA = dt * A
-        K = (torch.exp(dA) - 1.0) / A * C
-        # build convolution kernel across sequence length l
+        K = (torch.exp(dA) - 1.0) / A * B * C
         ar = torch.arange(L, device=A.device, dtype=torch.float32)
         K = K.unsqueeze(-1) * torch.exp(dA.unsqueeze(-1) * ar)
-        # sum over state dim -> ready for fft convolution
         return 2 * K.sum(dim=1).real
 
     def _step_params(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -173,7 +153,7 @@ class SSKernelNPLR(nn.Module):
         A_d, B_d, C = self._step_params()
         Bu = B_d * u.unsqueeze(-1)
         new_state = A_d * state + Bu
-        y = (C * new_state).sum(dim=-1).real + self.D * u
+        y = 2 * (C * new_state).sum(dim=-1).real
         return y, new_state
 
     def default_state(self, batch: int, device: torch.device) -> torch.Tensor:
