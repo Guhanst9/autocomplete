@@ -1,6 +1,7 @@
 import argparse
 
 from src.sliding_eval.fasta import PlastidRecord, find_genomes, find_record_by_accession
+from src.sliding_eval.generation import generate_windows
 from src.sliding_eval.regions import RegionMap, infer_regions
 from src.sliding_eval.windows import build_windows, write_windows_csv
 
@@ -25,6 +26,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_windows_per_genome", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--sample", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top_k", type=int, default=4)
+    parser.add_argument("--repetition_penalty", type=float, default=1.25)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=8)
     return parser.parse_args()
 
 
@@ -81,7 +89,7 @@ def main() -> None:
         print()
         print_region_map(record, region_map)
 
-    if args.dry_run:
+    if args.dry_run or args.checkpoint:
         region_map = infer_regions(record.sequence)
         windows = build_windows(
             record,
@@ -91,11 +99,25 @@ def main() -> None:
             args.stride,
             args.max_windows_per_genome,
         )
+        if args.checkpoint:
+            generate_windows(
+                windows,
+                checkpoint=args.checkpoint,
+                generate_length=args.generate_length,
+                batch_size=args.batch_size,
+                do_sample=args.sample,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                repetition_penalty=args.repetition_penalty,
+                no_repeat_ngram_size=args.no_repeat_ngram_size,
+            )
         output_path = write_windows_csv(record, windows, args.output_dir)
         print()
-        print("Sliding-window dry run")
+        print("Sliding-window evaluation" if args.checkpoint else "Sliding-window dry run")
         print(f"  Windows: {len(windows)}")
         print(f"  Prompt length: {args.prompt_length}")
         print(f"  Target length: {args.generate_length}")
         print(f"  Stride: {args.stride}")
+        if args.checkpoint:
+            print(f"  Checkpoint: {args.checkpoint}")
         print(f"  CSV: {output_path}")

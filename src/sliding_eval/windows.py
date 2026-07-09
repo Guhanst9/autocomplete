@@ -17,6 +17,9 @@ class SlidingWindow:
     region: str
     prompt: str
     true_suffix: str
+    generated_suffix: str = ""
+    generated_length: int | None = None
+    accuracy_percent: float | None = None
 
 
 def build_windows(
@@ -88,10 +91,12 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
                     "target_start": window.target_start,
                     "target_end": window.target_end,
                     "region": window.region,
-                    "generated_length": "",
-                    "accuracy_percent": "",
+                    "generated_length": "" if window.generated_length is None else window.generated_length,
+                    "accuracy_percent": (
+                        "" if window.accuracy_percent is None else f"{window.accuracy_percent:.2f}"
+                    ),
                     "prompt": window.prompt,
-                    "generated_suffix": "",
+                    "generated_suffix": window.generated_suffix,
                     "true_suffix": window.true_suffix,
                 }
             )
