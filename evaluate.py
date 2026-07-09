@@ -1,6 +1,3 @@
-"""
-Evaluation: perplexity, masked accuracy, per-position and per-amino-acid breakdown.
-"""
 import argparse
 import os
 from collections import defaultdict
@@ -26,6 +23,11 @@ def parse_args():
     p.add_argument("--prefix_length", type=int, default=None)
     p.add_argument("--prefix_min_fraction", type=float, default=0.25)
     p.add_argument("--prefix_max_fraction", type=float, default=0.70)
+    p.add_argument("--end_prefix_prob", type=float, default=0.0)
+    p.add_argument("--end_prefix_min_fraction", type=float, default=0.75)
+    p.add_argument("--end_prefix_max_fraction", type=float, default=0.95)
+    p.add_argument("--eos_loss_weight", type=float, default=None,
+                   help="EOS loss weight for reported loss. Defaults to checkpoint config or 1.0.")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--max_batches", type=int, default=None,
@@ -84,7 +86,14 @@ def infer_model_shape(state, ckpt):
 
 
 @torch.no_grad()
-def evaluate_model(model, dataloader, device, objective="autocomplete", max_batches=None):
+def evaluate_model(
+    model,
+    dataloader,
+    device,
+    objective="autocomplete",
+    max_batches=None,
+    eos_loss_weight=1.0,
+):
     model.eval()
     total_loss = 0.0
     total_scored = 0
@@ -111,6 +120,7 @@ def evaluate_model(model, dataloader, device, objective="autocomplete", max_batc
         loss = model.compute_loss(
             input_ids, target_ids, attention_mask,
             loss_mask=loss_mask, objective=objective,
+            eos_loss_weight=eos_loss_weight,
         )
         total_loss += loss.item()
         n_batches += 1
@@ -181,7 +191,6 @@ def evaluate_model(model, dataloader, device, objective="autocomplete", max_batc
 
 
 def get_device():
-    """Get best available device: CUDA > MPS > CPU"""
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -201,6 +210,11 @@ def main():
     d_model, d_state, n_layers, kernel_type = infer_model_shape(state, ckpt)
 
     bidirectional = ckpt.get("bidirectional", args.objective == "masked") if isinstance(ckpt, dict) else args.objective == "masked"
+    model_config = ckpt.get("model_config", {}) if isinstance(ckpt, dict) else {}
+    eos_loss_weight = args.eos_loss_weight
+    if eos_loss_weight is None:
+        eos_loss_weight = model_config.get("eos_loss_weight", 1.0)
+
     model = S4ProteinModel(
         vocab_size=vocab_size,
         d_model=d_model,
@@ -219,6 +233,8 @@ def main():
     print(f"   Model: d_model={d_model}, d_state={d_state}, n_layers={n_layers}, kernel_type={kernel_type}")
     print(f"   Objective: {args.objective}")
     print(f"   Bidirectional: {bidirectional}")
+    if args.objective == "autocomplete" and eos_loss_weight != 1.0:
+        print(f"   EOS loss weight: {eos_loss_weight:.2f}")
     if args.max_sequences:
         print(f"   Max sequences: {args.max_sequences:,}")
     if args.max_batches:
@@ -234,6 +250,9 @@ def main():
         prefix_length=args.prefix_length,
         prefix_min_fraction=args.prefix_min_fraction,
         prefix_max_fraction=args.prefix_max_fraction,
+        end_prefix_prob=args.end_prefix_prob,
+        end_prefix_min_fraction=args.end_prefix_min_fraction,
+        end_prefix_max_fraction=args.end_prefix_max_fraction,
         cache_dir=args.cache_dir,
         max_sequences=args.max_sequences,
     )
@@ -244,7 +263,14 @@ def main():
         num_workers=args.num_workers,
     )
 
-    results = evaluate_model(model, loader, device, args.objective, args.max_batches)
+    results = evaluate_model(
+        model,
+        loader,
+        device,
+        args.objective,
+        args.max_batches,
+        eos_loss_weight=eos_loss_weight,
+    )
 
     print("Loss:", results["loss"])
     print("Perplexity:", results["perplexity"])

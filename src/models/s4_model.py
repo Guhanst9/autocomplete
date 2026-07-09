@@ -1,6 +1,3 @@
-"""
-Full S4 model for protein sequence autocompletion.
-"""
 from typing import Optional, Tuple
 
 import torch
@@ -23,11 +20,6 @@ def _get_config(size: str) -> dict:
 
 
 class S4ProteinModel(nn.Module):
-    """
-    S4 model for protein sequence autocompletion:
-    embed -> N x S4Block -> ln -> output projection -> logits.
-    """
-
     def __init__(
         self,
         vocab_size: int = 23,
@@ -72,18 +64,16 @@ class S4ProteinModel(nn.Module):
         self.embed.weight.data.normal_(mean=0.0, std=0.02)
         self.apply(_init_weights)
 
-
-    # embedding -> s4 blocks -> layer norm -> output projection pipeline
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = self.embed(input_ids)  # tokens -> vectors
-        for block in self.blocks:  # n × s4 block processing
+        x = self.embed(input_ids)
+        for block in self.blocks:
             x, _ = block(x, attention_mask=attention_mask)
-        x = self.ln_f(x)  # layer normalization
-        logits = self.lm_head(x)  # -> amino acid logits
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
         return logits
 
 
@@ -95,8 +85,8 @@ class S4ProteinModel(nn.Module):
         attention_mask: torch.Tensor,
         loss_mask: Optional[torch.Tensor] = None,
         objective: str = "masked",
+        eos_loss_weight: float = 1.0,
     ) -> torch.Tensor:
-        """Cross-entropy for either masked LM or autocomplete suffix prediction."""
         logits = self.forward(input_ids, attention_mask=attention_mask)
         labels = target_ids.clone()
         labels[attention_mask == 0] = -100
@@ -104,17 +94,32 @@ class S4ProteinModel(nn.Module):
         if objective == "masked":
             labels[input_ids != self.mask_token_id] = -100
         elif objective == "autocomplete":
+            # only grade suffix positions after the prompt
             if loss_mask is None:
                 loss_mask = (target_ids != self.pad_token_id) & (attention_mask == 1)
             labels[loss_mask == 0] = -100
         else:
             raise ValueError("objective must be 'masked' or 'autocomplete'")
 
+        class_weights = None
+        if (
+            objective == "autocomplete"
+            and eos_loss_weight != 1.0
+            and self.eos_token_id is not None
+        ):
+            class_weights = torch.ones(
+                self.vocab_size,
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            class_weights[self.eos_token_id] = eos_loss_weight
+
         loss = torch.nn.functional.cross_entropy(
             logits.view(-1, self.vocab_size),
             labels.view(-1),
             reduction="mean",
             ignore_index=-100,
+            weight=class_weights,
         )
         return loss
 
@@ -133,21 +138,8 @@ class S4ProteinModel(nn.Module):
         forbidden_token_ids: Optional[Tuple[int, ...]] = None,
         repetition_penalty: float = 1.0,
         no_repeat_ngram_size: Optional[int] = None,
+        min_new_tokens: int = 0,
     ) -> torch.Tensor:
-        """
-        Autoregressive generation using recurrent step mode (O(1) per token).
-        
-        Args:
-            prompt_ids: (batch, prompt_len) - input sequence
-            max_new_tokens: number of tokens to generate
-            temperature: sampling temperature
-            top_k: top-k filtering
-            top_p: nucleus sampling threshold
-            do_sample: if False, use greedy decoding
-            use_recurrent: if True, use O(1) recurrent step mode (faster for long generation)
-        
-        Returns: (batch, prompt_len + max_new_tokens)
-        """
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         
@@ -157,12 +149,12 @@ class S4ProteinModel(nn.Module):
             return self._generate_recurrent(
                 prompt_ids, max_new_tokens, temperature, top_k, top_p, do_sample,
                 eos_token_id, stop_at_eos, forbidden_token_ids,
-                repetition_penalty, no_repeat_ngram_size,
+                repetition_penalty, no_repeat_ngram_size, min_new_tokens,
             )
         return self._generate_forward(
             prompt_ids, max_new_tokens, temperature, top_k, top_p, do_sample,
             eos_token_id, stop_at_eos, forbidden_token_ids,
-            repetition_penalty, no_repeat_ngram_size,
+            repetition_penalty, no_repeat_ngram_size, min_new_tokens,
         )
     
     @torch.no_grad()
@@ -179,53 +171,50 @@ class S4ProteinModel(nn.Module):
         forbidden_token_ids: Optional[Tuple[int, ...]],
         repetition_penalty: float,
         no_repeat_ngram_size: Optional[int],
+        min_new_tokens: int,
     ) -> torch.Tensor:
-        """
-        Recurrent step-based generation - O(1) per token after prompt processing.
-        Uses S4's recurrent mode for efficient autoregressive inference.
-        """
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         
-        # Initialize states for each layer
+        # recurrent generation caches one s4 state per layer
         states = [block.default_state(batch, device) for block in self.blocks]
         
-        # Process prompt tokens to build up state
         for t in range(prompt_len):
-            token = prompt_ids[:, t]  # (batch,)
-            x = self.embed(token)     # (batch, d_model)
+            token = prompt_ids[:, t]
+            x = self.embed(token)
             
-            # Step through each block, updating states
             for i, block in enumerate(self.blocks):
                 x, states[i] = block.step(x, states[i])
         
-        # Generate new tokens using recurrent step mode
         generated = prompt_ids.tolist()
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
         
-        for _ in range(max_new_tokens):
-            # Get logits from current hidden state
+        for generated_count in range(max_new_tokens):
             x_final = self.ln_f(x)
-            logits = self.lm_head(x_final)  # (batch, vocab_size)
+            logits = self.lm_head(x_final)
 
             if forbidden_token_ids:
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
                 if valid_forbidden:
                     logits[:, valid_forbidden] = -1e10
+            if (
+                stop_at_eos
+                and eos_token_id is not None
+                and generated_count < min_new_tokens
+                and 0 <= eos_token_id < logits.size(-1)
+            ):
+                logits[:, eos_token_id] = -1e10
 
             logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
             logits = _ban_repeated_ngrams(logits, generated, no_repeat_ngram_size)
             
-            # Apply temperature
             if temperature != 1.0:
                 logits = logits / temperature
             
-            # Top-k filtering
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, -1:]] = -1e10
             
-            # Top-p (nucleus) filtering
             if top_p is not None:
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
                 cum = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
@@ -235,7 +224,6 @@ class S4ProteinModel(nn.Module):
                 sorted_logits[remove] = -1e10
                 logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
             
-            # Sample or greedy
             if do_sample:
                 probs = torch.softmax(logits, dim=-1)
                 next_tok = torch.multinomial(probs, 1).squeeze(-1)
@@ -247,15 +235,13 @@ class S4ProteinModel(nn.Module):
                 next_tok = torch.where(finished, eos, next_tok)
                 finished = finished | (next_tok == eos_token_id)
             
-            # Append to generated
             for i in range(batch):
                 generated[i].append(next_tok[i].item())
 
             if stop_at_eos and eos_token_id is not None and finished.all().item():
                 break
             
-            # Step the model with new token (O(1) operation!)
-            x = self.embed(next_tok)  # (batch, d_model)
+            x = self.embed(next_tok)
             for i, block in enumerate(self.blocks):
                 x, states[i] = block.step(x, states[i])
         
@@ -275,17 +261,14 @@ class S4ProteinModel(nn.Module):
         forbidden_token_ids: Optional[Tuple[int, ...]],
         repetition_penalty: float,
         no_repeat_ngram_size: Optional[int],
+        min_new_tokens: int,
     ) -> torch.Tensor:
-        """
-        Forward-based generation - re-encodes entire sequence each step.
-        Slower but uses convolution mode (good for short sequences).
-        """
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         generated = list(prompt_ids.cpu().tolist())
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
         
-        for _ in range(max_new_tokens):
+        for generated_count in range(max_new_tokens):
             context = torch.tensor([s[-self.max_length:] for s in generated], device=device)
             logits = self.forward(context)[:, -1, :]
 
@@ -293,6 +276,13 @@ class S4ProteinModel(nn.Module):
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
                 if valid_forbidden:
                     logits[:, valid_forbidden] = -1e10
+            if (
+                stop_at_eos
+                and eos_token_id is not None
+                and generated_count < min_new_tokens
+                and 0 <= eos_token_id < logits.size(-1)
+            ):
+                logits[:, eos_token_id] = -1e10
 
             logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
             logits = _ban_repeated_ngrams(logits, generated, no_repeat_ngram_size)
@@ -398,7 +388,6 @@ def _ban_repeated_ngrams(
 
 
 def adapt_state_dict_vocab(state_dict: dict, vocab_size: int) -> dict:
-    """Resize token embedding/head rows so older checkpoints can load."""
     state_dict = dict(state_dict)
     for key in ("embed.weight", "lm_head.weight"):
         if key not in state_dict:

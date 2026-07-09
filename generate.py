@@ -1,6 +1,3 @@
-"""
-Autoregressive protein sequence completion.
-"""
 import argparse
 import os
 from typing import Optional
@@ -29,6 +26,8 @@ def parse_args():
                    help="Use greedy decoding instead of sampling")
     p.add_argument("--stop_at_eos", action="store_true", default=True)
     p.add_argument("--no_stop_at_eos", dest="stop_at_eos", action="store_false")
+    p.add_argument("--min_new_tokens", type=int, default=0,
+                   help="Do not allow EOS until at least this many residues are generated")
     p.add_argument("--repetition_penalty", type=float, default=1.15,
                    help="Penalty applied to tokens already seen in the generated context")
     p.add_argument("--no_repeat_ngram_size", type=int, default=3,
@@ -63,14 +62,14 @@ def infer_model_shape(state, ckpt):
     return d_model, d_state, max(1, n_layers), kernel_type
 
 
-# autoregressive model that completes a partial protein sequence by generating residues one at a time
 def complete_protein(model, tokenizer, partial_sequence: str, completion_length: int,
                     temperature: float = 1.0, top_k=None, top_p=None, do_sample: bool = True,
                     stop_at_eos: bool = True, repetition_penalty: float = 1.0,
-                    no_repeat_ngram_size: Optional[int] = None, device=None):
+                    no_repeat_ngram_size: Optional[int] = None,
+                    min_new_tokens: int = 0, device=None):
     prompt_ids = tokenizer.encode(partial_sequence)
     prompt_t = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    out = model.generate(  # autoregressive generation with sampled decoding
+    out = model.generate(
         prompt_t,
         max_new_tokens=completion_length,
         temperature=temperature,
@@ -86,9 +85,10 @@ def complete_protein(model, tokenizer, partial_sequence: str, completion_length:
         ),
         repetition_penalty=repetition_penalty,
         no_repeat_ngram_size=no_repeat_ngram_size,
+        min_new_tokens=min_new_tokens,
     )
     seq_ids = out[0].tolist()
-    return tokenizer.decode(seq_ids, stop_at_eos=stop_at_eos)  # convert token ids back to amino acid sequence string
+    return tokenizer.decode(seq_ids, stop_at_eos=stop_at_eos)
 
 
 def main():
@@ -128,6 +128,7 @@ def main():
         stop_at_eos=args.stop_at_eos,
         repetition_penalty=args.repetition_penalty,
         no_repeat_ngram_size=args.no_repeat_ngram_size,
+        min_new_tokens=args.min_new_tokens,
         device=device,
     )
     print("Partial:", args.partial_sequence)

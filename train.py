@@ -29,6 +29,12 @@ def parse_args():
                    help="Fixed autocomplete prefix length. If omitted, use random prefix fractions.")
     p.add_argument("--prefix_min_fraction", type=float, default=0.25)
     p.add_argument("--prefix_max_fraction", type=float, default=0.70)
+    p.add_argument("--end_prefix_prob", type=float, default=0.0,
+                   help="Probability of sampling autocomplete prefixes near sequence ends.")
+    p.add_argument("--end_prefix_min_fraction", type=float, default=0.75)
+    p.add_argument("--end_prefix_max_fraction", type=float, default=0.95)
+    p.add_argument("--eos_loss_weight", type=float, default=1.0,
+                   help="Extra class weight for EOS targets in autocomplete loss.")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -92,16 +98,17 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
     total_loss = 0.0
     n_batches = 0
     pbar = tqdm(loader, desc="Train")
+    optimizer.zero_grad(set_to_none=True)
     
     for step, batch in enumerate(pbar):
         input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
 
-        # Mixed precision: only for CUDA
         if use_amp and device.type == "cuda":
             with torch.cuda.amp.autocast():
                 loss = model.compute_loss(
                     input_ids, target_ids, attention_mask,
                     loss_mask=loss_mask, objective=args.objective,
+                    eos_loss_weight=args.eos_loss_weight,
                 )
                 if args.grad_accum_steps > 1:
                     loss = loss / args.grad_accum_steps
@@ -112,15 +119,15 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
                 global_step += 1
         else:
-            # MPS or CPU: no mixed precision
             loss = model.compute_loss(
                 input_ids, target_ids, attention_mask,
                 loss_mask=loss_mask, objective=args.objective,
+                eos_loss_weight=args.eos_loss_weight,
             )
             if args.grad_accum_steps > 1:
                 loss = loss / args.grad_accum_steps
@@ -129,7 +136,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
             if (step + 1) % args.grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None:
                     scheduler.step()
                 global_step += 1
@@ -138,11 +145,25 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, device, args, g
         n_batches += 1
         pbar.set_postfix(loss=loss.item() * (args.grad_accum_steps if args.grad_accum_steps > 1 else 1))
 
+    if args.grad_accum_steps > 1 and n_batches % args.grad_accum_steps != 0:
+        if use_amp and device.type == "cuda":
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if scheduler is not None:
+            scheduler.step()
+        global_step += 1
+
     return total_loss / max(n_batches, 1), global_step
 
 
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, objective, eos_loss_weight=1.0):
     model.eval()
     total_loss = 0.0
     n = 0
@@ -150,7 +171,8 @@ def validate(model, loader, device):
         input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
         loss = model.compute_loss(
             input_ids, target_ids, attention_mask,
-            loss_mask=loss_mask, objective=args.objective,
+            loss_mask=loss_mask, objective=objective,
+            eos_loss_weight=eos_loss_weight,
         )
         total_loss += loss.item()
         n += 1
@@ -158,7 +180,6 @@ def validate(model, loader, device):
 
 
 def get_device():
-    """Get best available device: CUDA > MPS > CPU"""
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -188,6 +209,13 @@ def main():
             print(f"   Prefix length: {args.prefix_length}")
         else:
             print(f"   Prefix fraction: {args.prefix_min_fraction:.2f}-{args.prefix_max_fraction:.2f}")
+        if args.end_prefix_prob > 0:
+            print(
+                f"   End-prefix sampling: p={args.end_prefix_prob:.2f}, "
+                f"fraction={args.end_prefix_min_fraction:.2f}-{args.end_prefix_max_fraction:.2f}"
+            )
+        if args.eos_loss_weight != 1.0:
+            print(f"   EOS loss weight: {args.eos_loss_weight:.2f}")
     print()
     
     train_dataset = ProteinDataset(
@@ -199,6 +227,9 @@ def main():
         prefix_length=args.prefix_length,
         prefix_min_fraction=args.prefix_min_fraction,
         prefix_max_fraction=args.prefix_max_fraction,
+        end_prefix_prob=args.end_prefix_prob,
+        end_prefix_min_fraction=args.end_prefix_min_fraction,
+        end_prefix_max_fraction=args.end_prefix_max_fraction,
         cache_dir=args.cache_dir,
         max_sequences=args.max_sequences,
     )
@@ -221,6 +252,9 @@ def main():
             prefix_length=args.prefix_length,
             prefix_min_fraction=args.prefix_min_fraction,
             prefix_max_fraction=args.prefix_max_fraction,
+            end_prefix_prob=args.end_prefix_prob,
+            end_prefix_min_fraction=args.end_prefix_min_fraction,
+            end_prefix_max_fraction=args.end_prefix_max_fraction,
             cache_dir=args.cache_dir,
         )
         val_loader = DataLoader(
@@ -258,7 +292,6 @@ def main():
         total_steps = (len(train_loader) + args.grad_accum_steps - 1) // args.grad_accum_steps * args.epochs
     scheduler = get_cosine_schedule_with_warmup(optimizer, args.warmup_steps, total_steps)
     
-    # Only create GradScaler for CUDA (not needed for MPS/CPU)
     scaler = torch.amp.GradScaler('cuda', enabled=(args.use_amp and device.type == "cuda"))
 
     start_epoch = 0
@@ -296,14 +329,20 @@ def main():
         except Exception:
             pass
 
-    # Only use AMP on CUDA
     use_amp = args.use_amp and device.type == "cuda"
+    best_path = os.path.join(args.output_dir, "best.pt")
     
     for epoch in range(start_epoch, args.epochs):
         train_loss, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler, scaler, device, args, global_step, use_amp
         )
-        val_loss = validate(model, val_loader, device) if val_loader else train_loss
+        val_loss = validate(
+            model,
+            val_loader,
+            device,
+            args.objective,
+            args.eos_loss_weight,
+        ) if val_loader else train_loss
 
         if run:
             try:
@@ -327,14 +366,18 @@ def main():
                 "n_layers": model.n_layers,
                 "kernel_type": model.kernel_type,
                 "eos_token_id": tokenizer.eos_token_id,
+                "eos_loss_weight": args.eos_loss_weight,
+                "end_prefix_prob": args.end_prefix_prob,
+                "end_prefix_min_fraction": args.end_prefix_min_fraction,
+                "end_prefix_max_fraction": args.end_prefix_max_fraction,
             },
         }
         torch.save(save, os.path.join(args.output_dir, "last.pt"))
 
-        if val_loss < best_val_loss and args.save_best:
+        if args.save_best and (not os.path.exists(best_path) or val_loss < best_val_loss):
             best_val_loss = val_loss
             save["best_val_loss"] = best_val_loss
-            torch.save(save, os.path.join(args.output_dir, "best.pt"))
+            torch.save(save, best_path)
 
         print(f"Epoch {epoch} train_loss={train_loss:.4f} val_loss={val_loss:.4f} best={best_val_loss:.4f}")
 
