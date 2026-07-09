@@ -106,7 +106,7 @@ def coordinate_in_region(position: int, region: Region, genome_length: int) -> b
     start = region.start % genome_length
     end = (region.end - 1) % genome_length
     if region.end <= genome_length:
-        return region.start <= position < region.end
+        return start <= normalized <= end
     return normalized >= start or normalized <= end
 
 

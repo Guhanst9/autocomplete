@@ -30,6 +30,7 @@ def build_windows(
     stride: int,
     max_windows: Optional[int] = None,
     window_starts: Optional[list[int]] = None,
+    circular: bool = False,
 ) -> list[SlidingWindow]:
     if prompt_length <= 0 or generate_length <= 0 or stride <= 0:
         raise ValueError("prompt_length, generate_length, and stride must be positive")
@@ -37,34 +38,75 @@ def build_windows(
     total_length = prompt_length + generate_length
     windows: list[SlidingWindow] = []
     if window_starts is None:
-        starts = range(0, record.length - total_length + 1, stride)
+        starts = default_window_starts(record.length, prompt_length, total_length, stride, circular)
     else:
         starts = window_starts
 
     for start in starts:
-        if start < 0 or start + total_length > record.length:
-            raise ValueError(
-                f"Window start {start} is outside valid range 0-{record.length - total_length}"
-            )
-        prompt_start = start
-        prompt_end = start + prompt_length - 1
-        target_start = start + prompt_length
-        target_end = start + total_length - 1
+        validate_window_start(start, record.length, total_length, circular)
+        prompt_start = start % record.length
+        prompt_end = (start + prompt_length - 1) % record.length
+        target_start_abs = start + prompt_length
+        target_end_abs = start + total_length
+        target_start = target_start_abs % record.length
+        target_end = (target_end_abs - 1) % record.length
         windows.append(
             SlidingWindow(
-                window_start=start,
+                window_start=start % record.length,
                 prompt_start=prompt_start,
                 prompt_end=prompt_end,
                 target_start=target_start,
                 target_end=target_end,
-                region=label_interval(target_start, target_end + 1, region_map, record.length),
-                prompt=record.sequence[prompt_start : prompt_end + 1],
-                true_suffix=record.sequence[target_start : target_end + 1],
+                region=label_interval(target_start_abs, target_end_abs, region_map, record.length),
+                prompt=slice_sequence(record.sequence, start, prompt_length, circular),
+                true_suffix=slice_sequence(record.sequence, target_start_abs, generate_length, circular),
             )
         )
         if max_windows is not None and len(windows) >= max_windows:
             break
     return windows
+
+
+def default_window_starts(
+    record_length: int,
+    prompt_length: int,
+    total_length: int,
+    stride: int,
+    circular: bool,
+) -> list[int]:
+    if not circular:
+        return list(range(0, record_length - total_length + 1, stride))
+
+    last_prompt_start = record_length - prompt_length
+    starts = list(range(0, last_prompt_start + 1, stride))
+    if starts and starts[-1] != last_prompt_start:
+        starts.append(last_prompt_start)
+    elif not starts and last_prompt_start >= 0:
+        starts.append(last_prompt_start)
+    return starts
+
+
+def validate_window_start(start: int, record_length: int, total_length: int, circular: bool) -> None:
+    if circular:
+        if start < 0 or start >= record_length:
+            raise ValueError(f"Window start {start} is outside valid circular range 0-{record_length - 1}")
+        return
+
+    max_start = record_length - total_length
+    if start < 0 or start > max_start:
+        raise ValueError(f"Window start {start} is outside valid range 0-{max_start}")
+
+
+def slice_sequence(sequence: str, start: int, length: int, circular: bool) -> str:
+    if not circular:
+        return sequence[start : start + length]
+
+    n = len(sequence)
+    start = start % n
+    if start + length <= n:
+        return sequence[start : start + length]
+    repeats = (length // n) + 2
+    return (sequence * repeats)[start : start + length]
 
 
 def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], output_dir: str) -> str:

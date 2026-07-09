@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=256)
     parser.add_argument("--max_windows_per_genome", type=int, default=None)
     parser.add_argument("--window_starts", type=str, default=None)
+    parser.add_argument("--circular", action="store_true")
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
@@ -113,6 +114,7 @@ def main() -> None:
             args.stride,
             args.max_windows_per_genome,
             window_starts,
+            circular=args.circular,
         )
         if args.checkpoint:
             generate_windows(
@@ -133,6 +135,7 @@ def main() -> None:
         print(f"  Prompt length: {args.prompt_length}")
         print(f"  Target length: {args.generate_length}")
         print(f"  Stride: {args.stride}")
+        print(f"  Circular: {'yes' if args.circular else 'no'}")
         if window_starts is not None:
             print(f"  Window starts: {','.join(str(start) for start in window_starts)}")
         if args.checkpoint:
