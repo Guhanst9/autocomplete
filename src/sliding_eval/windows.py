@@ -29,13 +29,23 @@ def build_windows(
     generate_length: int,
     stride: int,
     max_windows: Optional[int] = None,
+    window_starts: Optional[list[int]] = None,
 ) -> list[SlidingWindow]:
     if prompt_length <= 0 or generate_length <= 0 or stride <= 0:
         raise ValueError("prompt_length, generate_length, and stride must be positive")
 
     total_length = prompt_length + generate_length
     windows: list[SlidingWindow] = []
-    for start in range(0, record.length - total_length + 1, stride):
+    if window_starts is None:
+        starts = range(0, record.length - total_length + 1, stride)
+    else:
+        starts = window_starts
+
+    for start in starts:
+        if start < 0 or start + total_length > record.length:
+            raise ValueError(
+                f"Window start {start} is outside valid range 0-{record.length - total_length}"
+            )
         prompt_start = start
         prompt_end = start + prompt_length - 1
         target_start = start + prompt_length

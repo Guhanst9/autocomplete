@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generate_length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=256)
     parser.add_argument("--max_windows_per_genome", type=int, default=None)
+    parser.add_argument("--window_starts", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
@@ -34,6 +35,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repetition_penalty", type=float, default=1.25)
     parser.add_argument("--no_repeat_ngram_size", type=int, default=8)
     return parser.parse_args()
+
+
+def parse_window_starts(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    starts = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        starts.append(int(item))
+    return starts
 
 
 def print_genome_list(genus: str, total_matches: int, records: list[PlastidRecord]) -> None:
@@ -91,6 +104,7 @@ def main() -> None:
 
     if args.dry_run or args.checkpoint:
         region_map = infer_regions(record.sequence)
+        window_starts = parse_window_starts(args.window_starts)
         windows = build_windows(
             record,
             region_map,
@@ -98,6 +112,7 @@ def main() -> None:
             args.generate_length,
             args.stride,
             args.max_windows_per_genome,
+            window_starts,
         )
         if args.checkpoint:
             generate_windows(
@@ -118,6 +133,8 @@ def main() -> None:
         print(f"  Prompt length: {args.prompt_length}")
         print(f"  Target length: {args.generate_length}")
         print(f"  Stride: {args.stride}")
+        if window_starts is not None:
+            print(f"  Window starts: {','.join(str(start) for start in window_starts)}")
         if args.checkpoint:
             print(f"  Checkpoint: {args.checkpoint}")
         print(f"  CSV: {output_path}")
