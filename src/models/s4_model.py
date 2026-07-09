@@ -188,10 +188,11 @@ class S4ProteinModel(nn.Module):
         
         generated = prompt_ids.tolist()
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
-        
+          
         for generated_count in range(max_new_tokens):
             x_final = self.ln_f(x)
             logits = self.lm_head(x_final)
+            raw_logits = logits.clone()
 
             if forbidden_token_ids:
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
@@ -223,6 +224,8 @@ class S4ProteinModel(nn.Module):
                 remove[..., 0] = False
                 sorted_logits[remove] = -1e10
                 logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
+
+            logits = _ensure_valid_logits(logits, raw_logits, forbidden_token_ids)
             
             if do_sample:
                 probs = torch.softmax(logits, dim=-1)
@@ -271,6 +274,7 @@ class S4ProteinModel(nn.Module):
         for generated_count in range(max_new_tokens):
             context = torch.tensor([s[-self.max_length:] for s in generated], device=device)
             logits = self.forward(context)[:, -1, :]
+            raw_logits = logits.clone()
 
             if forbidden_token_ids:
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
@@ -300,6 +304,8 @@ class S4ProteinModel(nn.Module):
                 remove[..., 0] = False
                 sorted_logits[remove] = -1e10
                 logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
+
+            logits = _ensure_valid_logits(logits, raw_logits, forbidden_token_ids)
             
             if do_sample:
                 probs = torch.softmax(logits, dim=-1)
@@ -385,6 +391,29 @@ def _ban_repeated_ngrams(
                 banned[b, token_id] = -1e10
 
     return banned
+
+
+def _ensure_valid_logits(
+    logits: torch.Tensor,
+    fallback_logits: torch.Tensor,
+    forbidden_token_ids: Optional[Tuple[int, ...]],
+) -> torch.Tensor:
+    allowed = torch.ones(logits.size(-1), dtype=torch.bool, device=logits.device)
+    if forbidden_token_ids:
+        for token_id in forbidden_token_ids:
+            if 0 <= token_id < logits.size(-1):
+                allowed[token_id] = False
+
+    valid_logits = logits[:, allowed]
+    has_choice = torch.isfinite(valid_logits).any(dim=-1) & (valid_logits > -1e9).any(dim=-1)
+    if has_choice.all().item():
+        return logits
+
+    repaired = logits.clone()
+    fallback = fallback_logits.clone()
+    fallback[:, ~allowed] = -1e10
+    repaired[~has_choice] = fallback[~has_choice]
+    return repaired
 
 
 def adapt_state_dict_vocab(state_dict: dict, vocab_size: int) -> dict:
