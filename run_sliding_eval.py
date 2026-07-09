@@ -8,6 +8,7 @@ from typing import Iterable, Optional
 DEFAULT_FASTA = "data/plastid/refseq_full/refseq_plastids_all.fna.gz"
 DEFAULT_ACCESSION = "NC_053550.1"
 EXPECTED_LENGTH = 157396
+DNA_COMPLEMENT = str.maketrans("ACGTN", "TGCAN")
 
 @dataclass
 class PlastidRecord:
@@ -19,6 +20,21 @@ class PlastidRecord:
     def length(self) -> int:
         return len(self.sequence)
 
+@dataclass
+class Region:
+    name: str
+    start: int
+    end: int
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
+@dataclass
+class RegionMap:
+    regions: list[Region]
+    status: str
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run sliding-window evaluation on plastid FASTA records.")
     parser.add_argument("--fasta_file", type=str, default=DEFAULT_FASTA)
@@ -26,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--genus", type=str, default="Rosa")
     parser.add_argument("--max_genomes", type=int, default=None)
     parser.add_argument("--list_genomes", action="store_true")
+    parser.add_argument("--check_regions", action="store_true")
     return parser.parse_args()
 
 
@@ -35,6 +52,9 @@ def normalize_dna(sequence: str) -> str:
 
 def parse_accession(header: str) -> str:
     return header.split()[0] if header else ""
+
+def reverse_complement(sequence: str) -> str:
+    return sequence.translate(DNA_COMPLEMENT)[::-1]
 
 def stream_fasta(path: str) -> Iterable[PlastidRecord]:
     open_fn = gzip.open if path.endswith(".gz") else open
@@ -93,6 +113,95 @@ def find_record_by_accession(fasta_file: str, accession: str) -> PlastidRecord:
             return record
     raise ValueError(f"Accession not found in FASTA: {accession}")
 
+def extend_reverse_repeat(sequence: str, left_start: int, right_seed_start: int, seed_length: int) -> Region:
+    n = len(sequence)
+    left_extra = 0
+    while (
+        left_start - 1 - left_extra >= 0
+        and right_seed_start + seed_length + left_extra < n
+        and sequence[left_start - 1 - left_extra]
+        == sequence[right_seed_start + seed_length + left_extra].translate(DNA_COMPLEMENT)
+    ):
+        left_extra += 1
+
+    right_extra = 0
+    while (
+        left_start + seed_length + right_extra < n
+        and right_seed_start - 1 - right_extra >= 0
+        and sequence[left_start + seed_length + right_extra]
+        == sequence[right_seed_start - 1 - right_extra].translate(DNA_COMPLEMENT)
+    ):
+        right_extra += 1
+
+    start = left_start - left_extra
+    end = left_start + seed_length + right_extra
+    return Region("repeat", start, end)
+
+def infer_regions(
+    sequence: str,
+    seed_length: int = 80,
+    scan_step: int = 50,
+    min_ir_length: int = 10000,
+    min_ir_spacing: int = 10000,
+) -> RegionMap:
+    positions: dict[str, list[int]] = {}
+    n = len(sequence)
+    for start in range(0, n - seed_length + 1):
+        seed = sequence[start : start + seed_length]
+        if "N" in seed:
+            continue
+        positions.setdefault(seed, []).append(start)
+
+    best_pair: tuple[int, int, int, int] | None = None
+    best_length = 0
+    for left_start in range(0, n - seed_length + 1, scan_step):
+        seed = sequence[left_start : left_start + seed_length]
+        if "N" in seed:
+            continue
+        rc_seed = reverse_complement(seed)
+        for right_start in positions.get(rc_seed, []):
+            if abs(left_start - right_start) < min_ir_spacing:
+                continue
+            left = extend_reverse_repeat(sequence, left_start, right_start, seed_length)
+            right = extend_reverse_repeat(sequence, right_start, left_start, seed_length)
+            if left.length < min_ir_length or right.length < min_ir_length:
+                continue
+            first, second = sorted([left, right], key=lambda region: region.start)
+            if first.length > best_length:
+                best_pair = (first.start, first.end, second.start, second.end)
+                best_length = first.length
+
+    if best_pair is None:
+        return RegionMap([Region("unknown", 0, n)], "unknown")
+
+    ir_a_start, ir_a_end, ir_b_start, ir_b_end = best_pair
+    gap_between = Region("single_copy", ir_a_end, ir_b_start)
+    gap_wrap = Region("single_copy", ir_b_end, n + ir_a_start)
+    lsc_gap, ssc_gap = sorted([gap_between, gap_wrap], key=lambda region: region.length, reverse=True)
+
+    regions = [
+        Region("IRA", ir_a_start, ir_a_end),
+        Region("IRB", ir_b_start, ir_b_end),
+        Region("LSC", lsc_gap.start, lsc_gap.end),
+        Region("SSC", ssc_gap.start, ssc_gap.end),
+    ]
+    return RegionMap(regions, "inferred")
+
+def print_region_map(record: PlastidRecord, region_map: RegionMap) -> None:
+    print("Region check")
+    print(f"  Accession: {record.accession}")
+    print(f"  Length: {record.length}")
+    print(f"  Status: {region_map.status}")
+    for region in sorted(region_map.regions, key=lambda item: item.start):
+        start = region.start
+        end = region.end - 1
+        display_start = start % record.length
+        display_end = end % record.length
+        print(
+            f"  {region.name}: {display_start}-{display_end} "
+            f"length={region.length}"
+        )
+
 def print_genome_list(genus: str, total_matches: int, records: list[PlastidRecord]) -> None:
     print(f"Genus: {genus}")
     print(f"Matching genomes: {total_matches}")
@@ -118,6 +227,10 @@ def main() -> None:
         raise ValueError(
             f"Expected {DEFAULT_ACCESSION} to be {EXPECTED_LENGTH} bp, found {record.length} bp"
         )
+    if args.check_regions:
+        region_map = infer_regions(record.sequence)
+        print()
+        print_region_map(record, region_map)
 
 if __name__ == "__main__":
     main()
