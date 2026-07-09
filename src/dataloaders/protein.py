@@ -71,7 +71,7 @@ def parse_fasta(fasta_file: str, show_progress: bool = True) -> List[Tuple[str, 
     bytes_read = 0
     seq_count = 0
 
-    print(f"📂 Loading FASTA file: {os.path.basename(fasta_file)}")
+    print(f"Loading FASTA file: {os.path.basename(fasta_file)}")
     
     with open_fn(fasta_file, mode) as f:
         pbar = tqdm(
@@ -108,7 +108,7 @@ def parse_fasta(fasta_file: str, show_progress: bool = True) -> List[Tuple[str, 
         if pbar:
             pbar.close()
     
-    print(f"✅ Parsed {len(sequences):,} sequences")
+    print(f"Parsed {len(sequences):,} sequences")
     return sequences
 
 
@@ -190,9 +190,9 @@ class ProteinDataset(Dataset):
             cache_file = os.path.join(cache_dir, f"sequences_{base}{suffix}_l{l_max}.pt")
         
         if cache_file and os.path.exists(cache_file):
-            print(f"📦 Loading cached sequences from: {os.path.basename(cache_file)}")
+            print(f"Loading cached sequences from: {os.path.basename(cache_file)}")
             self.sequences = torch.load(cache_file)
-            print(f"✅ Loaded {len(self.sequences):,} sequences from cache")
+            print(f"Loaded {len(self.sequences):,} sequences from cache")
         else:
             self._load_sequences(fasta_file, l_max, max_sequences, cache_file)
     
@@ -201,8 +201,8 @@ class ProteinDataset(Dataset):
         filtered_count = 0
         
         limit_str = f", max={max_sequences:,}" if max_sequences else ""
-        print(f"🔄 Loading sequences (l_max={l_max}{limit_str})...")
-        print(f"📂 File: {os.path.basename(fasta_file)}")
+        print(f"Loading sequences (l_max={l_max}{limit_str})...")
+        print(f"File: {os.path.basename(fasta_file)}")
         
         pbar = tqdm(
             stream_fasta(fasta_file, show_progress=False),
@@ -230,17 +230,17 @@ class ProteinDataset(Dataset):
         
         pbar.close()
         
-        print(f"✅ Loaded {len(self.sequences):,} sequences")
+        print(f"Loaded {len(self.sequences):,} sequences")
         if filtered_count > 0:
-            print(f"⚠️  Filtered out {filtered_count:,} sequences (longer than {l_max})")
+            print(f"Filtered out {filtered_count:,} sequences longer than {l_max}")
         
         mem_mb = sum(len(s) * 8 for s in self.sequences) / 1024 / 1024
-        print(f"💾 Estimated memory: ~{mem_mb:.1f} MB")
+        print(f"Estimated memory: ~{mem_mb:.1f} MB")
         
         if cache_file:
-            print(f"💾 Saving cache to: {os.path.basename(cache_file)}")
+            print(f"Saving cache to: {os.path.basename(cache_file)}")
             torch.save(self.sequences, cache_file)
-            print(f"✅ Cache saved!")
+            print("Cache saved")
     
     def __len__(self) -> int:
         return len(self.sequences)

@@ -228,7 +228,7 @@ def main():
     model.load_state_dict(state, strict=False)
     model = model.to(device)
     
-    print(f"📊 Evaluating checkpoint: {args.checkpoint}")
+    print(f"Evaluating checkpoint: {args.checkpoint}")
     print(f"   Device: {device}")
     print(f"   Model: d_model={d_model}, d_state={d_state}, n_layers={n_layers}, kernel_type={kernel_type}")
     print(f"   Objective: {args.objective}")

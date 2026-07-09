@@ -197,7 +197,7 @@ def main():
     if bidirectional is None:
         bidirectional = args.objective == "masked"
     
-    print(f"🚀 Starting training...")
+    print("Starting training...")
     print(f"   Device: {device}")
     print(f"   FASTA: {args.fasta_file}")
     print(f"   Objective: {args.objective}")
