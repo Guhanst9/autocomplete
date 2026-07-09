@@ -1,0 +1,133 @@
+project: plastid_s4_autocomplete
+purpose: current best plastid dna next-base model settings
+
+checkpoint:
+  best_path: outputs/plastid_full_16m_l1024_strong/best.pt
+  last_path: outputs/plastid_full_16m_l1024_strong/last.pt
+  output_dir: outputs/plastid_full_16m_l1024_strong
+  planned_epochs: 10
+  best_saved_epoch: 6
+  completed_epochs: 7
+  best_val_loss: 0.48759494483098387
+  parameter_count: 16691584
+
+model:
+  class: src.models.s4_model.S4ProteinModel
+  data_type: plastid_dna
+  objective: autocomplete
+  vocab_size: 8
+  d_model: 448
+  d_state: 64
+  n_layers: 10
+  kernel_type: diag
+  bidirectional: false
+  dropout: 0.1
+  l_max: 1024
+  max_length: 1024
+  eos_token_id: 2
+
+data:
+  fasta_file: data/plastid/refseq_full/refseq_plastids_all.fna.gz
+  records_used: 15234
+  max_records: 15234
+  max_windows: 60000
+  windows_per_record: 4
+  stride: null
+  train_val_split: 90_10_random_split
+  seed: 13
+  tokenizer_tokens:
+    - "<PAD>"
+    - "<UNK>"
+    - "<EOS>"
+    - A
+    - C
+    - G
+    - T
+    - N
+
+training:
+  script: run_plastid.py
+  batch_size: 2
+  epochs: 10
+  lr: 0.0003
+  weight_decay: 0.01
+  grad_clip: 1.0
+  prefix_min_fraction: 0.25
+  prefix_max_fraction: 0.70
+
+generation_defaults:
+  prompt_length: 500
+  generate_length: 500
+  temperature: 0.7
+  top_k: 4
+  repetition_penalty: 1.25
+  no_repeat_ngram_size: 8
+  min_new_tokens: 20
+
+metrics_by_epoch:
+  - epoch: 0
+    train_loss: 0.9418
+    val_loss: 0.7286
+    val_ppl: 2.072
+    val_top1: 0.6921
+    val_top3: 0.9414
+  - epoch: 1
+    train_loss: 0.7355
+    val_loss: 0.6381
+    val_ppl: 1.893
+    val_top1: 0.7382
+    val_top3: 0.9528
+  - epoch: 2
+    train_loss: 0.6593
+    val_loss: 0.5856
+    val_ppl: 1.796
+    val_top1: 0.7636
+    val_top3: 0.9592
+  - epoch: 3
+    train_loss: 0.6083
+    val_loss: 0.5479
+    val_ppl: 1.730
+    val_top1: 0.7815
+    val_top3: 0.9631
+  - epoch: 4
+    train_loss: 0.5717
+    val_loss: 0.5199
+    val_ppl: 1.682
+    val_top1: 0.7951
+    val_top3: 0.9663
+  - epoch: 5
+    train_loss: 0.5441
+    val_loss: 0.5014
+    val_ppl: 1.651
+    val_top1: 0.8033
+    val_top3: 0.9679
+  - epoch: 6
+    train_loss: 0.5230
+    val_loss: 0.4876
+    val_ppl: 1.628
+    val_top1: 0.8094
+    val_top3: 0.9692
+
+reproduce_command: >-
+  /opt/anaconda3/bin/python run_plastid.py
+  --fasta_file data/plastid/refseq_full/refseq_plastids_all.fna.gz
+  --output_dir outputs/plastid_full_16m_l1024_strong
+  --l_max 1024
+  --max_records 15234
+  --windows_per_record 4
+  --max_windows 60000
+  --batch_size 2
+  --epochs 10
+  --d_model 448
+  --d_state 64
+  --n_layers 10
+  --lr 3e-4
+  --prompt_length 500
+  --generate_length 500
+  --temperature 0.7
+  --top_k 4
+  --repetition_penalty 1.25
+  --no_repeat_ngram_size 8
+
+notes:
+  - best checkpoint is epoch 6 because the run did not finish all 10 planned epochs
