@@ -1,5 +1,0 @@
-fasta_file: data/protein/uniref50.fasta.gz
-val_fasta: null
-l_max: 1024
-mask_prob: 0.15
-cache_dir: null

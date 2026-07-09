@@ -1,6 +1,0 @@
-defaults:
-  - model: s4d_base
-  - training: default
-  - dataset: protein
-
-seed: 42

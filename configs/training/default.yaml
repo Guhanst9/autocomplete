@@ -1,8 +1,0 @@
-lr: 1.0e-3
-batch_size: 32
-epochs: 10
-warmup_steps: 1000
-weight_decay: 0.01
-grad_clip: 1.0
-grad_accum_steps: 1
-use_amp: true
