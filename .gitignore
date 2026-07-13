@@ -35,3 +35,4 @@ data/**/*.fna
 data/**/*.fa.gz
 data/**/*.fasta.gz
 data/**/*.fna.gz
+data/plastid/refseq_full/refseq_plastids_report.csv
