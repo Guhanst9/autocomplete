@@ -21,6 +21,7 @@ env/
 # generated project artifacts
 cache/
 outputs/
+/tests/
 
 # fasta and sequence data
 *.fa
