@@ -20,8 +20,8 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_k", type=int, default=2)
     parser.add_argument("--greedy", action="store_true", help="Use greedy decoding instead of sampling.")
-    parser.add_argument("--repetition_penalty", type=float, default=1.05)
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=8)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
     return parser.parse_args()
 
 

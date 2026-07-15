@@ -20,6 +20,11 @@ class SlidingWindow:
     generated_suffix: str = ""
     generated_length: int | None = None
     accuracy_percent: float | None = None
+    decoding_mode: str = ""
+    fallback_count: int | None = None
+    longest_generated_run: int | None = None
+    n_count: int | None = None
+    gc_difference_percent: float | None = None
 
 
 def build_windows(
@@ -124,6 +129,11 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
         "region",
         "generated_length",
         "accuracy_percent",
+        "decoding_mode",
+        "fallback_count",
+        "longest_generated_run",
+        "n_count",
+        "gc_difference_percent",
         "prompt",
         "generated_suffix",
         "true_suffix",
@@ -146,6 +156,17 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
                     "generated_length": "" if window.generated_length is None else window.generated_length,
                     "accuracy_percent": (
                         "" if window.accuracy_percent is None else f"{window.accuracy_percent:.2f}"
+                    ),
+                    "decoding_mode": window.decoding_mode,
+                    "fallback_count": "" if window.fallback_count is None else window.fallback_count,
+                    "longest_generated_run": (
+                        "" if window.longest_generated_run is None else window.longest_generated_run
+                    ),
+                    "n_count": "" if window.n_count is None else window.n_count,
+                    "gc_difference_percent": (
+                        ""
+                        if window.gc_difference_percent is None
+                        else f"{window.gc_difference_percent:.2f}"
                     ),
                     "prompt": window.prompt,
                     "generated_suffix": window.generated_suffix,

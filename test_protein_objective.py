@@ -130,8 +130,61 @@ def test_min_new_tokens_blocks_early_eos():
     print("min_new_tokens blocks early EOS")
 
 
+def test_generation_reports_constraint_fallback():
+    model = S4ProteinModel(
+        vocab_size=5,
+        d_model=4,
+        d_state=4,
+        n_layers=0,
+        eos_token_id=2,
+        max_length=8,
+    )
+    prompt = torch.tensor([[4, 3, 4, 4]])
+
+    output, diagnostics = model.generate(
+        prompt,
+        max_new_tokens=1,
+        do_sample=False,
+        use_recurrent=False,
+        eos_token_id=2,
+        stop_at_eos=False,
+        forbidden_token_ids=(0, 1, 2),
+        no_repeat_ngram_size=2,
+        return_diagnostics=True,
+    )
+
+    generated_token = output[0, -1].item()
+    assert generated_token in {3, 4}
+    assert diagnostics.fallback_counts == (1,)
+    print("constraint fallback is reported and permanent bans are preserved")
+
+
+def test_generation_default_return_stays_tensor():
+    model = S4ProteinModel(
+        vocab_size=5,
+        d_model=4,
+        d_state=4,
+        n_layers=0,
+        eos_token_id=2,
+        max_length=8,
+    )
+    prompt = torch.tensor([[3]])
+    output = model.generate(
+        prompt,
+        max_new_tokens=1,
+        do_sample=False,
+        use_recurrent=False,
+        stop_at_eos=False,
+    )
+
+    assert isinstance(output, torch.Tensor)
+    print("generation default return remains a tensor")
+
+
 if __name__ == "__main__":
     test_eos_loss_weight_increases_bad_eos_loss()
     test_end_prefix_sampling_moves_loss_start_near_end()
     test_min_new_tokens_blocks_early_eos()
+    test_generation_reports_constraint_fallback()
+    test_generation_default_return_stays_tensor()
     print("All protein objective tests passed!")

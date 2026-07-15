@@ -30,11 +30,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--sample", action="store_true")
+    parser.add_argument(
+        "--decoding_mode",
+        choices=["raw_greedy", "constrained_greedy", "sampled"],
+        default="raw_greedy",
+    )
+    parser.add_argument("--sample", action="store_true", help="Alias for --decoding_mode sampled.")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top_k", type=int, default=4)
-    parser.add_argument("--repetition_penalty", type=float, default=1.25)
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=8)
+    parser.add_argument("--repetition_penalty", type=float, default=None)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=13)
     return parser.parse_args()
 
 
@@ -48,6 +54,25 @@ def parse_window_starts(value: str | None) -> list[int] | None:
             continue
         starts.append(int(item))
     return starts
+
+
+def resolve_decoding(args: argparse.Namespace) -> tuple[str, bool, float, int | None]:
+    mode = "sampled" if args.sample else args.decoding_mode
+    requested_ngram = args.no_repeat_ngram_size
+    normalized_ngram = requested_ngram if requested_ngram is not None and requested_ngram >= 2 else None
+
+    if mode == "raw_greedy":
+        if args.repetition_penalty not in (None, 1.0) or normalized_ngram is not None:
+            raise ValueError("raw_greedy does not allow repetition penalties or n-gram blocking")
+        return mode, False, 1.0, None
+
+    if mode == "constrained_greedy":
+        repetition_penalty = 1.25 if args.repetition_penalty is None else args.repetition_penalty
+        no_repeat_ngram_size = 8 if requested_ngram is None else normalized_ngram
+        return mode, False, repetition_penalty, no_repeat_ngram_size
+
+    repetition_penalty = 1.0 if args.repetition_penalty is None else args.repetition_penalty
+    return mode, True, repetition_penalty, normalized_ngram
 
 
 def print_genome_list(genus: str, total_matches: int, records: list[PlastidRecord]) -> None:
@@ -88,6 +113,7 @@ def validate_default_record(record: PlastidRecord) -> None:
 
 def main() -> None:
     args = parse_args()
+    decoding_mode, do_sample, repetition_penalty, no_repeat_ngram_size = resolve_decoding(args)
 
     if args.list_genomes:
         total_matches, records = find_genomes(args.fasta_file, args.genus, args.max_genomes)
@@ -122,11 +148,13 @@ def main() -> None:
                 checkpoint=args.checkpoint,
                 generate_length=args.generate_length,
                 batch_size=args.batch_size,
-                do_sample=args.sample,
+                do_sample=do_sample,
                 temperature=args.temperature,
                 top_k=args.top_k,
-                repetition_penalty=args.repetition_penalty,
-                no_repeat_ngram_size=args.no_repeat_ngram_size,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+                decoding_mode=decoding_mode,
+                seed=args.seed,
             )
         output_path = write_windows_csv(record, windows, args.output_dir)
         print()
@@ -140,4 +168,7 @@ def main() -> None:
             print(f"  Window starts: {','.join(str(start) for start in window_starts)}")
         if args.checkpoint:
             print(f"  Checkpoint: {args.checkpoint}")
+            print(f"  Decoding mode: {decoding_mode}")
+            print(f"  Repetition penalty: {repetition_penalty}")
+            print(f"  No-repeat n-gram size: {no_repeat_ngram_size or 0}")
         print(f"  CSV: {output_path}")

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
@@ -7,6 +8,11 @@ try:
     from src.models.s4.s4_layer import S4Block
 except ImportError:
     from .s4.s4_layer import S4Block
+
+
+@dataclass(frozen=True)
+class GenerationDiagnostics:
+    fallback_counts: tuple[int, ...]
 
 
 def _get_config(size: str) -> dict:
@@ -139,7 +145,8 @@ class S4ProteinModel(nn.Module):
         repetition_penalty: float = 1.0,
         no_repeat_ngram_size: Optional[int] = None,
         min_new_tokens: int = 0,
-    ) -> torch.Tensor:
+        return_diagnostics: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, GenerationDiagnostics]:
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         
@@ -150,11 +157,13 @@ class S4ProteinModel(nn.Module):
                 prompt_ids, max_new_tokens, temperature, top_k, top_p, do_sample,
                 eos_token_id, stop_at_eos, forbidden_token_ids,
                 repetition_penalty, no_repeat_ngram_size, min_new_tokens,
+                return_diagnostics,
             )
         return self._generate_forward(
             prompt_ids, max_new_tokens, temperature, top_k, top_p, do_sample,
             eos_token_id, stop_at_eos, forbidden_token_ids,
             repetition_penalty, no_repeat_ngram_size, min_new_tokens,
+            return_diagnostics,
         )
     
     @torch.no_grad()
@@ -172,7 +181,8 @@ class S4ProteinModel(nn.Module):
         repetition_penalty: float,
         no_repeat_ngram_size: Optional[int],
         min_new_tokens: int,
-    ) -> torch.Tensor:
+        return_diagnostics: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, GenerationDiagnostics]:
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         
@@ -188,16 +198,18 @@ class S4ProteinModel(nn.Module):
         
         generated = prompt_ids.tolist()
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
+        fallback_counts = torch.zeros(batch, dtype=torch.long, device=device)
           
         for generated_count in range(max_new_tokens):
             x_final = self.ln_f(x)
             logits = self.lm_head(x_final)
-            raw_logits = logits.clone()
+            blocked_token_ids = set()
 
             if forbidden_token_ids:
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
                 if valid_forbidden:
                     logits[:, valid_forbidden] = -1e10
+                    blocked_token_ids.update(valid_forbidden)
             if (
                 stop_at_eos
                 and eos_token_id is not None
@@ -205,9 +217,17 @@ class S4ProteinModel(nn.Module):
                 and 0 <= eos_token_id < logits.size(-1)
             ):
                 logits[:, eos_token_id] = -1e10
+                blocked_token_ids.add(eos_token_id)
 
             logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
+            fallback_logits = logits.clone()
             logits = _ban_repeated_ngrams(logits, generated, no_repeat_ngram_size)
+            logits, repaired = _repair_invalid_logits(
+                logits,
+                fallback_logits,
+                tuple(blocked_token_ids),
+            )
+            fallback_counts += repaired.long()
             
             if temperature != 1.0:
                 logits = logits / temperature
@@ -225,8 +245,6 @@ class S4ProteinModel(nn.Module):
                 sorted_logits[remove] = -1e10
                 logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
 
-            logits = _ensure_valid_logits(logits, raw_logits, forbidden_token_ids)
-            
             if do_sample:
                 probs = torch.softmax(logits, dim=-1)
                 next_tok = torch.multinomial(probs, 1).squeeze(-1)
@@ -248,7 +266,11 @@ class S4ProteinModel(nn.Module):
             for i, block in enumerate(self.blocks):
                 x, states[i] = block.step(x, states[i])
         
-        return torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
+        output = torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
+        if return_diagnostics:
+            counts = tuple(int(value) for value in fallback_counts.detach().cpu().tolist())
+            return output, GenerationDiagnostics(fallback_counts=counts)
+        return output
     
     @torch.no_grad()
     def _generate_forward(
@@ -265,21 +287,24 @@ class S4ProteinModel(nn.Module):
         repetition_penalty: float,
         no_repeat_ngram_size: Optional[int],
         min_new_tokens: int,
-    ) -> torch.Tensor:
+        return_diagnostics: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, GenerationDiagnostics]:
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
         generated = list(prompt_ids.cpu().tolist())
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
+        fallback_counts = torch.zeros(batch, dtype=torch.long, device=device)
         
         for generated_count in range(max_new_tokens):
             context = torch.tensor([s[-self.max_length:] for s in generated], device=device)
             logits = self.forward(context)[:, -1, :]
-            raw_logits = logits.clone()
+            blocked_token_ids = set()
 
             if forbidden_token_ids:
                 valid_forbidden = [i for i in forbidden_token_ids if 0 <= i < logits.size(-1)]
                 if valid_forbidden:
                     logits[:, valid_forbidden] = -1e10
+                    blocked_token_ids.update(valid_forbidden)
             if (
                 stop_at_eos
                 and eos_token_id is not None
@@ -287,9 +312,17 @@ class S4ProteinModel(nn.Module):
                 and 0 <= eos_token_id < logits.size(-1)
             ):
                 logits[:, eos_token_id] = -1e10
+                blocked_token_ids.add(eos_token_id)
 
             logits = _apply_repetition_penalty(logits, generated, repetition_penalty)
+            fallback_logits = logits.clone()
             logits = _ban_repeated_ngrams(logits, generated, no_repeat_ngram_size)
+            logits, repaired = _repair_invalid_logits(
+                logits,
+                fallback_logits,
+                tuple(blocked_token_ids),
+            )
+            fallback_counts += repaired.long()
             
             if temperature != 1.0:
                 logits = logits / temperature
@@ -305,8 +338,6 @@ class S4ProteinModel(nn.Module):
                 sorted_logits[remove] = -1e10
                 logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
 
-            logits = _ensure_valid_logits(logits, raw_logits, forbidden_token_ids)
-            
             if do_sample:
                 probs = torch.softmax(logits, dim=-1)
                 next_tok = torch.multinomial(probs, 1).squeeze(-1)
@@ -324,7 +355,11 @@ class S4ProteinModel(nn.Module):
             if stop_at_eos and eos_token_id is not None and finished.all().item():
                 break
         
-        return torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
+        output = torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
+        if return_diagnostics:
+            counts = tuple(int(value) for value in fallback_counts.detach().cpu().tolist())
+            return output, GenerationDiagnostics(fallback_counts=counts)
+        return output
 
     @classmethod
     def from_preset(cls, size: str, **kwargs) -> "S4ProteinModel":
@@ -398,22 +433,40 @@ def _ensure_valid_logits(
     fallback_logits: torch.Tensor,
     forbidden_token_ids: Optional[Tuple[int, ...]],
 ) -> torch.Tensor:
+    repaired, _ = _repair_invalid_logits(logits, fallback_logits, forbidden_token_ids)
+    return repaired
+
+
+def _repair_invalid_logits(
+    logits: torch.Tensor,
+    fallback_logits: torch.Tensor,
+    forbidden_token_ids: Optional[Tuple[int, ...]],
+) -> tuple[torch.Tensor, torch.Tensor]:
     allowed = torch.ones(logits.size(-1), dtype=torch.bool, device=logits.device)
     if forbidden_token_ids:
         for token_id in forbidden_token_ids:
             if 0 <= token_id < logits.size(-1):
                 allowed[token_id] = False
+    if not allowed.any().item():
+        raise ValueError("generation requires at least one allowed token")
 
     valid_logits = logits[:, allowed]
     has_choice = torch.isfinite(valid_logits).any(dim=-1) & (valid_logits > -1e9).any(dim=-1)
     if has_choice.all().item():
-        return logits
+        return logits, ~has_choice
 
     repaired = logits.clone()
     fallback = fallback_logits.clone()
     fallback[:, ~allowed] = -1e10
+    fallback_valid = fallback[:, allowed]
+    fallback_has_choice = (
+        torch.isfinite(fallback_valid).any(dim=-1)
+        & (fallback_valid > -1e9).any(dim=-1)
+    )
+    if not fallback_has_choice[~has_choice].all().item():
+        raise RuntimeError("generation fallback has no valid token")
     repaired[~has_choice] = fallback[~has_choice]
-    return repaired
+    return repaired, ~has_choice
 
 
 def adapt_state_dict_vocab(state_dict: dict, vocab_size: int) -> dict:

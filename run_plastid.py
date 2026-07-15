@@ -245,8 +245,8 @@ def parse_args():
     parser.add_argument("--top_k", type=int, default=4)
     parser.add_argument("--greedy", action="store_true", help="Use greedy decoding for the final sample.")
     parser.add_argument("--eval_train", action="store_true", help="Also report teacher-forced metrics on train windows.")
-    parser.add_argument("--repetition_penalty", type=float, default=1.05)
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=8)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
     parser.add_argument("--seed", type=int, default=13)
     return parser.parse_args()
 
