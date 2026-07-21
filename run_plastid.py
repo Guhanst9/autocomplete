@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 try:
@@ -17,18 +17,22 @@ except ImportError:
 
 
 class PlastidTokenizer:
-    def __init__(self):
+    def __init__(self, include_n: bool = False, vocab: Optional[dict[str, int]] = None):
         self.pad_token = "<PAD>"
         self.unk_token = "<UNK>"
         self.eos_token = "<EOS>"
-        self.bases = ["A", "C", "G", "T", "N"]
-        self.vocab = {
-            self.pad_token: 0,
-            self.unk_token: 1,
-            self.eos_token: 2,
-        }
-        for base in self.bases:
-            self.vocab[base] = len(self.vocab)
+        if vocab is not None:
+            self.vocab = dict(vocab)
+            self.bases = [base for base in ["A", "C", "G", "T", "N"] if base in self.vocab]
+        else:
+            self.bases = ["A", "C", "G", "T"] + (["N"] if include_n else [])
+            self.vocab = {
+                self.pad_token: 0,
+                self.unk_token: 1,
+                self.eos_token: 2,
+            }
+            for base in self.bases:
+                self.vocab[base] = len(self.vocab)
         self.idx_to_token = {v: k for k, v in self.vocab.items()}
         self.vocab_size = len(self.vocab)
         self.pad_token_id = self.vocab[self.pad_token]
@@ -37,10 +41,21 @@ class PlastidTokenizer:
 
     def normalize(self, sequence: str) -> str:
         sequence = sequence.upper().replace("U", "T")
-        return "".join(base if base in {"A", "C", "G", "T", "N"} else "N" for base in sequence)
+        allowed = set(self.bases)
+        return "".join(base if base in allowed else self.unk_token for base in sequence)
 
     def encode(self, sequence: str) -> list[int]:
-        return [self.vocab.get(base, self.unk_token_id) for base in self.normalize(sequence)]
+        normalized = self.normalize(sequence)
+        tokens = []
+        i = 0
+        while i < len(normalized):
+            if normalized.startswith(self.unk_token, i):
+                tokens.append(self.unk_token_id)
+                i += len(self.unk_token)
+            else:
+                tokens.append(self.vocab.get(normalized[i], self.unk_token_id))
+                i += 1
+        return tokens
 
     def decode(self, token_ids: Iterable[int], stop_at_eos: bool = True) -> str:
         out = []
@@ -55,6 +70,13 @@ class PlastidTokenizer:
             token = self.idx_to_token.get(token_id, "N")
             out.append(token if token in self.bases else "N")
         return "".join(out)
+
+
+def tokenizer_from_checkpoint(checkpoint: dict) -> PlastidTokenizer:
+    vocab = checkpoint.get("tokenizer_vocab")
+    if vocab is None:
+        return PlastidTokenizer(include_n=True)
+    return PlastidTokenizer(vocab=vocab)
 
 
 def stream_fasta(path: str) -> Iterable[tuple[str, str]]:
@@ -78,6 +100,46 @@ def stream_fasta(path: str) -> Iterable[tuple[str, str]]:
             yield header, "".join(chunks)
 
 
+def accession_from_header(header: str) -> str:
+    return header.split()[0] if header else ""
+
+
+def load_plastid_records(
+    fasta_file: str,
+    tokenizer: PlastidTokenizer,
+    max_records: Optional[int],
+    exclude_accessions: set[str],
+) -> list[tuple[str, str]]:
+    records = []
+    for header, sequence in stream_fasta(fasta_file):
+        accession = accession_from_header(header)
+        if accession in exclude_accessions:
+            continue
+        normalized = tokenizer.normalize(sequence)
+        if not normalized or tokenizer.unk_token in normalized:
+            continue
+        records.append((header, normalized))
+        if max_records is not None and len(records) >= max_records:
+            break
+    if not records:
+        raise ValueError(f"No usable plastid records were loaded from {fasta_file}")
+    return records
+
+
+def split_records(
+    records: list[tuple[str, str]],
+    val_fraction: float,
+    seed: int,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    if len(records) < 2:
+        raise ValueError("record-level train/val split needs at least 2 records")
+    shuffled = records.copy()
+    random.Random(seed).shuffle(shuffled)
+    val_size = max(1, int(round(len(shuffled) * val_fraction)))
+    val_size = min(val_size, len(shuffled) - 1)
+    return shuffled[val_size:], shuffled[:val_size]
+
+
 @dataclass
 class Window:
     tokens: list[int]
@@ -97,6 +159,7 @@ class PlastidAutocompleteDataset(Dataset):
         prefix_min_fraction: float = 0.25,
         prefix_max_fraction: float = 0.70,
         seed: int = 13,
+        records: Optional[list[tuple[str, str]]] = None,
     ):
         if l_max < 4:
             raise ValueError("l_max must be at least 4")
@@ -114,11 +177,17 @@ class PlastidAutocompleteDataset(Dataset):
         self.first_sequence = ""
         rng = random.Random(seed)
 
+        source_records = records
+        if source_records is None:
+            source_records = load_plastid_records(
+                fasta_file=fasta_file,
+                tokenizer=tokenizer,
+                max_records=max_records,
+                exclude_accessions=set(),
+            )
+
         records_seen = 0
-        for header, sequence in stream_fasta(fasta_file):
-            if max_records is not None and records_seen >= max_records:
-                break
-            normalized = tokenizer.normalize(sequence)
+        for header, normalized in source_records:
             if not normalized:
                 continue
             if not self.first_sequence:
@@ -218,7 +287,7 @@ class PlastidAutocompleteDataset(Dataset):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run S4 autocomplete on plastid DNA data.")
-    parser.add_argument("--fasta_file", type=str, default="data/plastid/plant_chloroplast_refseq_500.fna.gz")
+    parser.add_argument("--fasta_file", type=str, default="data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz")
     parser.add_argument("--output_dir", type=str, default="outputs/plastid_quick")
     parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to continue training from.")
     parser.add_argument("--l_max", type=int, default=256)
@@ -237,8 +306,10 @@ def parse_args():
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--kernel_type", type=str, default="diag", choices=["diag"])
-    parser.add_argument("--model_variant", type=str, default="legacy", choices=["legacy", "s4d_v2"])
+    parser.add_argument("--model_variant", type=str, default="s4d_v2", choices=["legacy", "s4d_v2"])
     parser.add_argument("--ssm_lr", type=float, default=None)
+    parser.add_argument("--val_fraction", type=float, default=0.1)
+    parser.add_argument("--exclude_accession", action="append", default=["NC_053550.1"])
     parser.add_argument("--prefix_min_fraction", type=float, default=0.25)
     parser.add_argument("--prefix_max_fraction", type=float, default=0.70)
     parser.add_argument("--prompt_length", type=int, default=80)
@@ -401,7 +472,7 @@ def main():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = get_device()
-    tokenizer = PlastidTokenizer()
+    tokenizer = PlastidTokenizer(include_n=False)
     resume_checkpoint = None
     if args.resume:
         resume_checkpoint = torch.load(args.resume, map_location=device)
@@ -412,26 +483,48 @@ def main():
                 f"Checkpoint uses model_variant={resume_variant}; "
                 f"rerun with --model_variant {resume_variant} to resume it"
             )
+        tokenizer = tokenizer_from_checkpoint(resume_checkpoint)
 
-    print("Loading plastid FASTA windows...", flush=True)
-    dataset = PlastidAutocompleteDataset(
+    print("Loading plastid FASTA records...", flush=True)
+    records = load_plastid_records(
+        fasta_file=args.fasta_file,
+        tokenizer=tokenizer,
+        max_records=args.max_records,
+        exclude_accessions=set(args.exclude_accession or []),
+    )
+    train_records, val_records = split_records(records, args.val_fraction, args.seed)
+    train_max_windows = None
+    val_max_windows = None
+    if args.max_windows is not None:
+        val_max_windows = max(1, int(round(args.max_windows * args.val_fraction)))
+        train_max_windows = max(1, args.max_windows - val_max_windows)
+
+    print("Building plastid FASTA windows...", flush=True)
+    train_dataset = PlastidAutocompleteDataset(
         fasta_file=args.fasta_file,
         tokenizer=tokenizer,
         l_max=args.l_max,
         stride=args.stride,
-        max_records=args.max_records,
-        max_windows=args.max_windows,
+        max_records=None,
+        max_windows=train_max_windows,
         windows_per_record=args.windows_per_record,
         prefix_min_fraction=args.prefix_min_fraction,
         prefix_max_fraction=args.prefix_max_fraction,
         seed=args.seed,
+        records=train_records,
     )
-    val_size = max(1, int(round(len(dataset) * 0.1)))
-    train_size = len(dataset) - val_size
-    train_dataset, val_dataset = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(args.seed),
+    val_dataset = PlastidAutocompleteDataset(
+        fasta_file=args.fasta_file,
+        tokenizer=tokenizer,
+        l_max=args.l_max,
+        stride=args.stride,
+        max_records=None,
+        max_windows=val_max_windows,
+        windows_per_record=args.windows_per_record,
+        prefix_min_fraction=args.prefix_min_fraction,
+        prefix_max_fraction=args.prefix_max_fraction,
+        seed=args.seed + 1,
+        records=val_records,
     )
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
@@ -454,6 +547,7 @@ def main():
     optimizer = build_optimizer(model, args.lr, args.weight_decay, args.ssm_lr)
     start_epoch = 0
     best_val = float("inf")
+    best_free = float("inf")
 
     if args.resume:
         ckpt = resume_checkpoint
@@ -462,13 +556,15 @@ def main():
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt.get("epoch", -1) + 1
         best_val = ckpt.get("best_val_loss", best_val)
+        best_free = ckpt.get("best_free_score", best_free)
 
     print("Plastid S4 run")
     print(f"  Device: {device}")
     print(f"  FASTA: {args.fasta_file}")
-    print(f"  Records loaded: up to {args.max_records}")
-    print(f"  Windows: {len(dataset)}")
-    print(f"  Train/val windows: {train_size}/{val_size}")
+    print(f"  Records after exclusion/filtering: {len(records)}")
+    print(f"  Excluded accessions: {', '.join(args.exclude_accession or [])}")
+    print(f"  Train/val records: {len(train_records)}/{len(val_records)}")
+    print(f"  Train/val windows: {len(train_dataset)}/{len(val_dataset)}")
     print(f"  Vocab size: {tokenizer.vocab_size}")
     print(f"  Model: d_model={args.d_model}, d_state={args.d_state}, n_layers={args.n_layers}")
     print(f"  Model variant: {args.model_variant}")
@@ -492,6 +588,8 @@ def main():
             "objective": "autocomplete",
             "data_type": "plastid_dna",
             "best_val_loss": best_val,
+            "best_free_score": metrics["loss"],
+            "free_generation_metrics": None,
             "tokenizer_vocab": tokenizer.vocab,
             "model_config": {
                 "vocab_size": tokenizer.vocab_size,
@@ -505,8 +603,12 @@ def main():
             },
         }
         torch.save(save, os.path.join(args.output_dir, "last.pt"))
-        if is_best or not os.path.exists(os.path.join(args.output_dir, "best.pt")):
-            torch.save(save, os.path.join(args.output_dir, "best.pt"))
+        if is_best or not os.path.exists(os.path.join(args.output_dir, "best_loss.pt")):
+            torch.save(save, os.path.join(args.output_dir, "best_loss.pt"))
+        if metrics["loss"] < best_free or not os.path.exists(os.path.join(args.output_dir, "best_free.pt")):
+            best_free = metrics["loss"]
+            save["best_free_score"] = best_free
+            torch.save(save, os.path.join(args.output_dir, "best_free.pt"))
         line = (
             f"Epoch {epoch} "
             f"train_loss={train_loss:.4f} "
@@ -522,16 +624,16 @@ def main():
             )
         print(line)
 
-    prompt = dataset.first_sequence[: args.prompt_length]
+    prompt = train_dataset.first_sequence[: args.prompt_length]
     generated = generate_sample(model, tokenizer, prompt, args, device)
-    exact_acc = continuation_accuracy(prompt, generated, dataset.first_sequence)
+    exact_acc = continuation_accuracy(prompt, generated, train_dataset.first_sequence)
     print()
-    print("Prompt header:", dataset.first_header)
+    print("Prompt header:", train_dataset.first_header)
     print("Prompt:", prompt)
     print("Generated:", generated)
     if exact_acc is not None:
         print(f"Exact continuation accuracy: {exact_acc:.4f}")
-    print("Saved:", os.path.join(args.output_dir, "best.pt"))
+    print("Saved:", os.path.join(args.output_dir, "best_loss.pt"))
 
 
 if __name__ == "__main__":

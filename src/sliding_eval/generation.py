@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from tqdm import tqdm
 
-from run_plastid import PlastidTokenizer
+from run_plastid import tokenizer_from_checkpoint
 from src.models.s4_model import S4ProteinModel
 from src.sliding_eval.windows import SlidingWindow
 
@@ -17,10 +17,10 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_model(checkpoint: str) -> tuple[S4ProteinModel, PlastidTokenizer, torch.device]:
+def load_model(checkpoint: str):
     device = get_device()
-    tokenizer = PlastidTokenizer()
     ckpt = torch.load(checkpoint, map_location=device)
+    tokenizer = tokenizer_from_checkpoint(ckpt)
     config = ckpt.get("model_config", {})
     model = S4ProteinModel(
         vocab_size=tokenizer.vocab_size,
@@ -81,6 +81,13 @@ def generate_windows(
         batch = windows[start : start + batch_size]
         prompt_ids = [tokenizer.encode(window.prompt) for window in batch]
         prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device=device)
+        forbidden = [
+            tokenizer.pad_token_id,
+            tokenizer.unk_token_id,
+            tokenizer.eos_token_id,
+        ]
+        if "N" in tokenizer.vocab:
+            forbidden.append(tokenizer.vocab["N"])
         output, diagnostics = model.generate(
             prompt_tensor,
             max_new_tokens=generate_length,
@@ -89,12 +96,7 @@ def generate_windows(
             do_sample=do_sample,
             eos_token_id=tokenizer.eos_token_id,
             stop_at_eos=False,
-            forbidden_token_ids=(
-                tokenizer.pad_token_id,
-                tokenizer.unk_token_id,
-                tokenizer.eos_token_id,
-                tokenizer.vocab["N"],
-            ),
+            forbidden_token_ids=tuple(forbidden),
             repetition_penalty=repetition_penalty,
             no_repeat_ngram_size=no_repeat_ngram_size,
             min_new_tokens=generate_length,

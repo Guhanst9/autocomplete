@@ -5,7 +5,7 @@ from difflib import SequenceMatcher
 
 import torch
 
-from run_plastid import PlastidTokenizer, get_device, stream_fasta
+from run_plastid import PlastidTokenizer, get_device, stream_fasta, tokenizer_from_checkpoint
 from src.models.s4_model import S4ProteinModel
 
 
@@ -81,8 +81,7 @@ def extract_target_window(
     raise ValueError("Could not extract a full target window around the conserved k-mer.")
 
 
-def load_model(checkpoint: str, tokenizer: PlastidTokenizer, device: torch.device) -> S4ProteinModel:
-    ckpt = torch.load(checkpoint, map_location=device)
+def load_model(ckpt: dict, tokenizer: PlastidTokenizer, device: torch.device) -> S4ProteinModel:
     config = ckpt.get("model_config", {})
     model = S4ProteinModel(
         vocab_size=tokenizer.vocab_size,
@@ -174,8 +173,9 @@ def positional_identity(a: str, b: str) -> float:
 
 def main():
     args = parse_args()
-    tokenizer = PlastidTokenizer()
     device = get_device()
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    tokenizer = tokenizer_from_checkpoint(ckpt)
     records = load_records(args.fasta_file, tokenizer, args.max_records)
     kmer, record_indices = find_conserved_kmer(records, args.kmer_length)
     header, target_window, position = extract_target_window(
@@ -185,7 +185,7 @@ def main():
         args.prompt_length,
         args.suffix_length,
     )
-    model = load_model(args.checkpoint, tokenizer, device)
+    model = load_model(ckpt, tokenizer, device)
 
     prompt = target_window[: args.prompt_length]
     true_suffix = target_window[args.prompt_length :]
