@@ -254,12 +254,15 @@ class PlastidAutocompleteDataset(Dataset):
     def __len__(self) -> int:
         return len(self.windows)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def window_tokens(self, idx: int) -> list[int]:
         item = self.windows[idx]
         tokens = item.tokens.copy()
         if item.ends_sequence and len(tokens) < self.l_max:
             tokens.append(self.tokenizer.eos_token_id)
-        tokens = tokens[: self.l_max]
+        return tokens[: self.l_max]
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        tokens = self.window_tokens(idx)
         seq_len = len(tokens)
 
         min_prefix = max(1, int(round(seq_len * self.prefix_min_fraction)))
@@ -318,6 +321,12 @@ def parse_args():
     parser.add_argument("--top_k", type=int, default=4)
     parser.add_argument("--greedy", action="store_true", help="Use greedy decoding for the final sample.")
     parser.add_argument("--eval_train", action="store_true", help="Also report teacher-forced metrics on train windows.")
+    parser.add_argument("--rollout_length", type=int, default=64)
+    parser.add_argument("--rollout_loss_weight", type=float, default=0.1)
+    parser.add_argument("--scheduled_sampling_max", type=float, default=0.20)
+    parser.add_argument("--free_eval_windows", type=int, default=8)
+    parser.add_argument("--free_eval_prompt_length", type=int, default=512)
+    parser.add_argument("--free_eval_generate_length", type=int, default=64)
     parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
     parser.add_argument("--seed", type=int, default=13)
@@ -379,7 +388,75 @@ def unpack_batch(batch, device):
     )
 
 
-def train_one_epoch(model, loader, optimizer, device, grad_clip):
+def scheduled_sampling_for_epoch(epoch_offset: int, total_epochs: int, max_probability: float) -> float:
+    if total_epochs <= 1:
+        return 0.0
+    return max_probability * epoch_offset / max(1, total_epochs - 1)
+
+
+def recurrent_rollout_loss(
+    model: S4ProteinModel,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    rollout_length: int,
+    scheduled_sampling_probability: float,
+) -> torch.Tensor:
+    if rollout_length <= 0:
+        return input_ids.new_tensor(0.0, dtype=torch.float)
+
+    losses = []
+    batch_size = input_ids.size(0)
+    for batch_idx in range(batch_size):
+        seq_len = int(attention_mask[batch_idx].sum().item())
+        if seq_len < 3:
+            continue
+
+        sequence = input_ids[batch_idx, :seq_len]
+        prompt_len = max(1, seq_len - rollout_length)
+        targets = sequence[prompt_len:]
+        if targets.numel() == 0:
+            continue
+
+        states = [block.default_state(1, input_ids.device) for block in model.blocks]
+        for token in sequence[:prompt_len]:
+            x = model.embed(token.view(1))
+            for block_idx, block in enumerate(model.blocks):
+                x, states[block_idx] = block.step(x, states[block_idx])
+
+        for target in targets:
+            logits = model.lm_head(model.ln_f(x))
+            losses.append(
+                torch.nn.functional.cross_entropy(
+                    logits,
+                    target.view(1),
+                    reduction="mean",
+                )
+            )
+            predicted = logits.argmax(dim=-1).detach()
+            use_prediction = (
+                scheduled_sampling_probability > 0
+                and torch.rand((), device=input_ids.device).item() < scheduled_sampling_probability
+            )
+            next_token = predicted if use_prediction else target.view(1)
+            x = model.embed(next_token)
+            for block_idx, block in enumerate(model.blocks):
+                x, states[block_idx] = block.step(x, states[block_idx])
+
+    if not losses:
+        return input_ids.new_tensor(0.0, dtype=torch.float)
+    return torch.stack(losses).mean()
+
+
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    grad_clip,
+    rollout_length,
+    rollout_loss_weight,
+    scheduled_sampling_probability,
+):
     model.train()
     total_loss = 0.0
     for batch in tqdm(loader, desc="Train"):
@@ -392,6 +469,15 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip):
             loss_mask=loss_mask,
             objective="autocomplete",
         )
+        if rollout_loss_weight > 0 and rollout_length > 0:
+            rollout_loss = recurrent_rollout_loss(
+                model,
+                input_ids,
+                attention_mask,
+                rollout_length,
+                scheduled_sampling_probability,
+            )
+            loss = loss + rollout_loss_weight * rollout_loss
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
@@ -465,6 +551,82 @@ def continuation_accuracy(prompt: str, generated: str, reference: str) -> Option
         return None
     matches = sum(a == b for a, b in zip(generated_suffix, reference_suffix))
     return matches / len(generated_suffix)
+
+
+def longest_run(sequence: str) -> int:
+    best = 0
+    current = 0
+    previous = None
+    for base in sequence:
+        current = current + 1 if base == previous else 1
+        previous = base
+        best = max(best, current)
+    return best
+
+
+@torch.no_grad()
+def free_generation_metrics(
+    model: S4ProteinModel,
+    tokenizer: PlastidTokenizer,
+    dataset: PlastidAutocompleteDataset,
+    device: torch.device,
+    max_windows: int,
+    prompt_length: int,
+    generate_length: int,
+) -> dict[str, float]:
+    model.eval()
+    total_matches = 0
+    total_bases = 0
+    max_generated_run = 0
+    total_n = 0
+    evaluated = 0
+    forbidden = [
+        tokenizer.pad_token_id,
+        tokenizer.unk_token_id,
+        tokenizer.eos_token_id,
+    ]
+    if "N" in tokenizer.vocab:
+        forbidden.append(tokenizer.vocab["N"])
+
+    for idx in range(min(max_windows, len(dataset))):
+        tokens = dataset.window_tokens(idx)
+        current_prompt_length = min(prompt_length, max(1, len(tokens) - 1))
+        current_generate_length = min(generate_length, len(tokens) - current_prompt_length)
+        if current_generate_length <= 0:
+            continue
+
+        prompt_ids = torch.tensor([tokens[:current_prompt_length]], dtype=torch.long, device=device)
+        output = model.generate(
+            prompt_ids,
+            max_new_tokens=current_generate_length,
+            temperature=1.0,
+            top_k=None,
+            do_sample=False,
+            eos_token_id=tokenizer.eos_token_id,
+            stop_at_eos=False,
+            forbidden_token_ids=tuple(forbidden),
+            repetition_penalty=1.0,
+            no_repeat_ngram_size=0,
+            min_new_tokens=current_generate_length,
+        )
+        generated = output[0, current_prompt_length : current_prompt_length + current_generate_length].tolist()
+        truth = tokens[current_prompt_length : current_prompt_length + current_generate_length]
+        total_matches += sum(int(a == b) for a, b in zip(generated, truth))
+        total_bases += len(truth)
+        generated_text = tokenizer.decode(generated, stop_at_eos=False)
+        max_generated_run = max(max_generated_run, longest_run(generated_text))
+        total_n += generated_text.count("N")
+        evaluated += 1
+
+    accuracy = total_matches / total_bases if total_bases else 0.0
+    return {
+        "windows": evaluated,
+        "bases": total_bases,
+        "accuracy": accuracy,
+        "score": 1.0 - accuracy,
+        "longest_generated_run": max_generated_run,
+        "n_count": total_n,
+    }
 
 
 def main():
@@ -570,15 +732,43 @@ def main():
     print(f"  Model variant: {args.model_variant}")
     if args.model_variant == "s4d_v2":
         print(f"  SSM learning rate: {args.lr if args.ssm_lr is None else args.ssm_lr}")
+    print(f"  Rollout length: {args.rollout_length}")
+    print(f"  Rollout loss weight: {args.rollout_loss_weight}")
+    print(f"  Scheduled sampling max: {args.scheduled_sampling_max}")
+    print(f"  Free eval windows: {args.free_eval_windows}")
     if args.resume:
         print(f"  Resume: {args.resume} starting at epoch {start_epoch}")
     print()
 
     os.makedirs(args.output_dir, exist_ok=True)
     for epoch in range(start_epoch, start_epoch + args.epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, args.grad_clip)
+        epoch_offset = epoch - start_epoch
+        scheduled_sampling_probability = scheduled_sampling_for_epoch(
+            epoch_offset,
+            args.epochs,
+            args.scheduled_sampling_max,
+        )
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            args.grad_clip,
+            args.rollout_length,
+            args.rollout_loss_weight,
+            scheduled_sampling_probability,
+        )
         train_metrics = evaluate(model, train_loader, device) if args.eval_train else None
         metrics = evaluate(model, val_loader, device)
+        free_metrics = free_generation_metrics(
+            model,
+            tokenizer,
+            val_dataset,
+            device,
+            args.free_eval_windows,
+            args.free_eval_prompt_length,
+            args.free_eval_generate_length,
+        )
         is_best = metrics["loss"] < best_val
         best_val = min(best_val, metrics["loss"])
         save = {
@@ -588,8 +778,9 @@ def main():
             "objective": "autocomplete",
             "data_type": "plastid_dna",
             "best_val_loss": best_val,
-            "best_free_score": metrics["loss"],
-            "free_generation_metrics": None,
+            "best_free_score": min(best_free, free_metrics["score"]),
+            "free_generation_metrics": free_metrics,
+            "scheduled_sampling_probability": scheduled_sampling_probability,
             "tokenizer_vocab": tokenizer.vocab,
             "model_config": {
                 "vocab_size": tokenizer.vocab_size,
@@ -600,13 +791,16 @@ def main():
                 "model_variant": model.model_variant,
                 "eos_token_id": tokenizer.eos_token_id,
                 "l_max": args.l_max,
+                "rollout_length": args.rollout_length,
+                "rollout_loss_weight": args.rollout_loss_weight,
+                "scheduled_sampling_max": args.scheduled_sampling_max,
             },
         }
         torch.save(save, os.path.join(args.output_dir, "last.pt"))
         if is_best or not os.path.exists(os.path.join(args.output_dir, "best_loss.pt")):
             torch.save(save, os.path.join(args.output_dir, "best_loss.pt"))
-        if metrics["loss"] < best_free or not os.path.exists(os.path.join(args.output_dir, "best_free.pt")):
-            best_free = metrics["loss"]
+        if free_metrics["score"] < best_free or not os.path.exists(os.path.join(args.output_dir, "best_free.pt")):
+            best_free = free_metrics["score"]
             save["best_free_score"] = best_free
             torch.save(save, os.path.join(args.output_dir, "best_free.pt"))
         line = (
@@ -615,7 +809,10 @@ def main():
             f"val_loss={metrics['loss']:.4f} "
             f"val_ppl={metrics['perplexity']:.3f} "
             f"top1={metrics['top1']:.4f} "
-            f"top3={metrics['top3']:.4f}"
+            f"top3={metrics['top3']:.4f} "
+            f"free_acc={free_metrics['accuracy']:.4f} "
+            f"free_longest_run={free_metrics['longest_generated_run']} "
+            f"sched_sample={scheduled_sampling_probability:.3f}"
         )
         if train_metrics is not None:
             line += (
