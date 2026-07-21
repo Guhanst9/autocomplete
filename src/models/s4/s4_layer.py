@@ -33,21 +33,39 @@ class S4Layer(nn.Module):
         kernel_type: str = "diag",
         bidirectional: bool = False,
         l_max: Optional[int] = None,
+        model_variant: str = "legacy",
     ):
         super().__init__()
         self.d_model = d_model
         self.d_state = d_state
         self.bidirectional = bidirectional
+        self.model_variant = model_variant
         self.norm = nn.LayerNorm(d_model)
+
+        if model_variant not in {"legacy", "s4d_v2"}:
+            raise ValueError("model_variant must be 'legacy' or 's4d_v2'")
+        if model_variant == "s4d_v2" and kernel_type != "diag":
+            raise ValueError("s4d_v2 requires kernel_type='diag'")
 
         kernel_cls = SSKernelDiag if kernel_type == "diag" else SSKernelNPLR
         kwargs = dict(d_model=d_model, d_state=d_state, l_max=l_max)
+        if kernel_type == "diag":
+            kwargs["trainable_a_imag"] = model_variant == "s4d_v2"
         if kernel_type == "nplr":
             kwargs["rank"] = 1
         self.kernel = kernel_cls(**kwargs)
 
         self.dropout = nn.Dropout(dropout)
         self.D_skip = nn.Parameter(torch.randn(d_model) * 0.01)
+        if model_variant == "s4d_v2":
+            self.activation = nn.GELU()
+            self.output_linear = nn.Sequential(
+                nn.Linear(d_model, 2 * d_model),
+                nn.GLU(dim=-1),
+            )
+        else:
+            self.activation = nn.Identity()
+            self.output_linear = nn.Identity()
 
     def forward(
         self,
@@ -71,8 +89,13 @@ class S4Layer(nn.Module):
             y = y + y_rev
 
         y = y + u * self.D_skip.unsqueeze(-1)
-        y = self.dropout(y)
-        y = y.transpose(1, 2)
+        if self.model_variant == "legacy":
+            y = self.dropout(y).transpose(1, 2)
+        else:
+            y = y.transpose(1, 2)
+            y = self.activation(y)
+            y = self.dropout(y)
+            y = self.output_linear(y)
         out = y + residual
 
         if attention_mask is not None:
@@ -96,9 +119,9 @@ class S4Layer(nn.Module):
         y, new_state = self.kernel.step(x_norm, state)
         
         y = y + x_norm * self.D_skip
-        
+        y = self.activation(y)
         y = self.dropout(y)
-        
+        y = self.output_linear(y)
         out = y + x
         
         return out, new_state
@@ -117,6 +140,7 @@ class S4Block(nn.Module):
         kernel_type: str = "diag",
         bidirectional: bool = False,
         l_max: Optional[int] = None,
+        model_variant: str = "legacy",
     ):
         super().__init__()
         self.d_model = d_model
@@ -128,6 +152,7 @@ class S4Block(nn.Module):
             kernel_type=kernel_type,
             bidirectional=bidirectional,
             l_max=l_max,
+            model_variant=model_variant,
         )
         self.norm2 = nn.LayerNorm(d_model)
         self.mlp = nn.Sequential(

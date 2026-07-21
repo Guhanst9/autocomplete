@@ -41,6 +41,7 @@ class SSKernelDiag(nn.Module):
         dt_min: float = 0.001,
         dt_max: float = 0.1,
         l_max: Optional[int] = None,
+        trainable_a_imag: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -56,7 +57,11 @@ class SSKernelDiag(nn.Module):
         log_A_real = torch.log(0.5 * torch.ones(d_model, N_half))
         self.log_A_real = nn.Parameter(log_A_real)
         ar = torch.arange(N_half, dtype=torch.float).unsqueeze(0).expand(d_model, -1)
-        self.register_buffer("A_imag", math.pi * ar)
+        A_imag = math.pi * ar
+        if trainable_a_imag:
+            self.A_imag = nn.Parameter(A_imag)
+        else:
+            self.register_buffer("A_imag", A_imag)
 
         C = torch.randn(d_model, N_half, dtype=torch.cfloat)
         self.C_re = nn.Parameter(C.real)

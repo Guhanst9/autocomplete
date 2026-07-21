@@ -91,6 +91,7 @@ def load_model(checkpoint: str, tokenizer: PlastidTokenizer, device: torch.devic
         n_layers=config.get("n_layers", 8),
         kernel_type=config.get("kernel_type", "diag"),
         bidirectional=False,
+        model_variant=config.get("model_variant", "legacy"),
         l_max=config.get("l_max"),
         pad_token_id=tokenizer.pad_token_id,
         mask_token_id=tokenizer.unk_token_id,

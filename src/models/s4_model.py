@@ -35,6 +35,7 @@ class S4ProteinModel(nn.Module):
         dropout: float = 0.1,
         kernel_type: str = "diag",
         bidirectional: bool = True,
+        model_variant: str = "legacy",
         l_max: Optional[int] = None,
         pad_token_id: int = 0,
         mask_token_id: int = 1,
@@ -48,10 +49,16 @@ class S4ProteinModel(nn.Module):
         self.n_layers = n_layers
         self.kernel_type = kernel_type
         self.bidirectional = bidirectional
+        self.model_variant = model_variant
         self.pad_token_id = pad_token_id
         self.mask_token_id = mask_token_id
         self.eos_token_id = eos_token_id
         self.max_length = max_length
+
+        if model_variant not in {"legacy", "s4d_v2"}:
+            raise ValueError("model_variant must be 'legacy' or 's4d_v2'")
+        if model_variant == "s4d_v2" and kernel_type != "diag":
+            raise ValueError("s4d_v2 requires kernel_type='diag'")
 
         self.embed = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
         self.blocks = nn.ModuleList([
@@ -62,6 +69,7 @@ class S4ProteinModel(nn.Module):
                 kernel_type=kernel_type,
                 bidirectional=bidirectional,
                 l_max=l_max,
+                model_variant=model_variant,
             )
             for _ in range(n_layers)
         ])

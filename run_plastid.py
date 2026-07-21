@@ -236,7 +236,9 @@ def parse_args():
     parser.add_argument("--d_state", type=int, default=32)
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--kernel_type", type=str, default="diag", choices=["diag", "nplr"])
+    parser.add_argument("--kernel_type", type=str, default="diag", choices=["diag"])
+    parser.add_argument("--model_variant", type=str, default="legacy", choices=["legacy", "s4d_v2"])
+    parser.add_argument("--ssm_lr", type=float, default=None)
     parser.add_argument("--prefix_min_fraction", type=float, default=0.25)
     parser.add_argument("--prefix_max_fraction", type=float, default=0.70)
     parser.add_argument("--prompt_length", type=int, default=80)
@@ -257,6 +259,43 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def build_optimizer(
+    model: S4ProteinModel,
+    lr: float,
+    weight_decay: float,
+    ssm_lr: Optional[float] = None,
+) -> torch.optim.AdamW:
+    if model.model_variant == "legacy":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    ssm_suffixes = (
+        "kernel.log_dt",
+        "kernel.log_A_real",
+        "kernel.A_imag",
+    )
+    ssm_parameters = []
+    other_parameters = []
+    for name, parameter in model.named_parameters():
+        if name.endswith(ssm_suffixes):
+            ssm_parameters.append(parameter)
+        else:
+            other_parameters.append(parameter)
+
+    if not ssm_parameters:
+        raise ValueError("s4d_v2 did not expose trainable SSM parameters")
+
+    return torch.optim.AdamW(
+        [
+            {"params": other_parameters, "lr": lr, "weight_decay": weight_decay},
+            {
+                "params": ssm_parameters,
+                "lr": lr if ssm_lr is None else ssm_lr,
+                "weight_decay": 0.0,
+            },
+        ]
+    )
 
 
 def unpack_batch(batch, device):
@@ -363,6 +402,16 @@ def main():
     torch.manual_seed(args.seed)
     device = get_device()
     tokenizer = PlastidTokenizer()
+    resume_checkpoint = None
+    if args.resume:
+        resume_checkpoint = torch.load(args.resume, map_location=device)
+        resume_config = resume_checkpoint.get("model_config", {})
+        resume_variant = resume_config.get("model_variant", "legacy")
+        if resume_variant != args.model_variant:
+            raise ValueError(
+                f"Checkpoint uses model_variant={resume_variant}; "
+                f"rerun with --model_variant {resume_variant} to resume it"
+            )
 
     print("Loading plastid FASTA windows...", flush=True)
     dataset = PlastidAutocompleteDataset(
@@ -395,18 +444,19 @@ def main():
         dropout=args.dropout,
         kernel_type=args.kernel_type,
         bidirectional=False,
+        model_variant=args.model_variant,
         l_max=args.l_max,
         pad_token_id=tokenizer.pad_token_id,
         mask_token_id=tokenizer.unk_token_id,
         eos_token_id=tokenizer.eos_token_id,
         max_length=args.l_max,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, args.lr, args.weight_decay, args.ssm_lr)
     start_epoch = 0
     best_val = float("inf")
 
     if args.resume:
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = resume_checkpoint
         model.load_state_dict(ckpt["model_state_dict"], strict=True)
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
@@ -421,6 +471,9 @@ def main():
     print(f"  Train/val windows: {train_size}/{val_size}")
     print(f"  Vocab size: {tokenizer.vocab_size}")
     print(f"  Model: d_model={args.d_model}, d_state={args.d_state}, n_layers={args.n_layers}")
+    print(f"  Model variant: {args.model_variant}")
+    if args.model_variant == "s4d_v2":
+        print(f"  SSM learning rate: {args.lr if args.ssm_lr is None else args.ssm_lr}")
     if args.resume:
         print(f"  Resume: {args.resume} starting at epoch {start_epoch}")
     print()
@@ -446,6 +499,7 @@ def main():
                 "d_state": model.d_state,
                 "n_layers": model.n_layers,
                 "kernel_type": model.kernel_type,
+                "model_variant": model.model_variant,
                 "eos_token_id": tokenizer.eos_token_id,
                 "l_max": args.l_max,
             },

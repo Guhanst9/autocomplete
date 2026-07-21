@@ -63,6 +63,7 @@ def infer_model_shape(state, ckpt):
     d_model = state["embed.weight"].shape[1]
     d_state = model_config.get("d_state")
     kernel_type = model_config.get("kernel_type")
+    model_variant = model_config.get("model_variant")
 
     if d_state is None:
         for key in ("blocks.0.s4_layer.kernel.log_A_real", "blocks.0.s4_layer.kernel.A"):
@@ -74,6 +75,8 @@ def infer_model_shape(state, ckpt):
 
     if kernel_type is None:
         kernel_type = "nplr" if "blocks.0.s4_layer.kernel.A" in state else "diag"
+    if model_variant is None:
+        model_variant = "s4d_v2" if "blocks.0.s4_layer.output_linear.0.weight" in state else "legacy"
 
     block_keys = [k for k in state if k.startswith("blocks.")]
     if block_keys:
@@ -82,7 +85,7 @@ def infer_model_shape(state, ckpt):
     else:
         n_layers = 6
 
-    return d_model, d_state, max(1, n_layers), kernel_type
+    return d_model, d_state, max(1, n_layers), kernel_type, model_variant
 
 
 @torch.no_grad()
@@ -207,7 +210,7 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device)
     state = ckpt.get("model_state_dict", ckpt)
     vocab_size = tokenizer.vocab_size
-    d_model, d_state, n_layers, kernel_type = infer_model_shape(state, ckpt)
+    d_model, d_state, n_layers, kernel_type, model_variant = infer_model_shape(state, ckpt)
 
     bidirectional = ckpt.get("bidirectional", args.objective == "masked") if isinstance(ckpt, dict) else args.objective == "masked"
     model_config = ckpt.get("model_config", {}) if isinstance(ckpt, dict) else {}
@@ -222,6 +225,7 @@ def main():
         n_layers=n_layers,
         kernel_type=kernel_type,
         bidirectional=bidirectional,
+        model_variant=model_variant,
         eos_token_id=tokenizer.eos_token_id,
     )
     state = adapt_state_dict_vocab(state, model.vocab_size)
@@ -230,7 +234,10 @@ def main():
     
     print(f"Evaluating checkpoint: {args.checkpoint}")
     print(f"   Device: {device}")
-    print(f"   Model: d_model={d_model}, d_state={d_state}, n_layers={n_layers}, kernel_type={kernel_type}")
+    print(
+        f"   Model: d_model={d_model}, d_state={d_state}, n_layers={n_layers}, "
+        f"kernel_type={kernel_type}, model_variant={model_variant}"
+    )
     print(f"   Objective: {args.objective}")
     print(f"   Bidirectional: {bidirectional}")
     if args.objective == "autocomplete" and eos_loss_weight != 1.0:
