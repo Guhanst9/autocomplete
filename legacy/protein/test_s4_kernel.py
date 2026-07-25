@@ -6,7 +6,35 @@ from src.models.s4.s4_kernel import SSKernelDiag, SSKernelNPLR, discretize_zoh, 
 from src.models.s4.s4_layer import S4Layer
 from src.models.s4_model import S4ProteinModel
 from src.models.hippo.hippo import hippo_init, transition_legs
-from run_plastid import build_optimizer
+
+
+def build_optimizer(model, lr, weight_decay, ssm_lr=None):
+    if getattr(model, "model_variant", "legacy") == "legacy":
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    ssm_suffixes = (
+        "kernel.log_dt",
+        "kernel.log_A_real",
+        "kernel.A_imag",
+    )
+    ssm_parameters = []
+    other_parameters = []
+    for name, parameter in model.named_parameters():
+        if name.endswith(ssm_suffixes):
+            ssm_parameters.append(parameter)
+        else:
+            other_parameters.append(parameter)
+
+    return torch.optim.AdamW(
+        [
+            {"params": other_parameters, "lr": lr, "weight_decay": weight_decay},
+            {
+                "params": ssm_parameters,
+                "lr": lr if ssm_lr is None else ssm_lr,
+                "weight_decay": 0.0,
+            },
+        ]
+    )
 
 def test_discretization():
     print("testing discretization...")

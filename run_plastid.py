@@ -201,7 +201,7 @@ class PlastidAutocompleteDataset(Dataset):
             records_seen += 1
             if records_seen % 1000 == 0:
                 print(
-                    f"  Loaded {records_seen:,} records, sampled {len(self.windows):,} windows...",
+                    f"  Loaded {records_seen:,} records, collected {len(self.windows):,} windows...",
                     flush=True,
                 )
             if max_windows is not None and len(self.windows) >= max_windows:
@@ -315,20 +315,12 @@ def parse_args():
     parser.add_argument("--exclude_accession", action="append", default=["NC_053550.1"])
     parser.add_argument("--prefix_min_fraction", type=float, default=0.25)
     parser.add_argument("--prefix_max_fraction", type=float, default=0.70)
-    parser.add_argument("--prompt_length", type=int, default=80)
-    parser.add_argument("--generate_length", type=int, default=120)
-    parser.add_argument("--temperature", type=float, default=0.9)
-    parser.add_argument("--top_k", type=int, default=4)
-    parser.add_argument("--greedy", action="store_true", help="Use greedy decoding for the final sample.")
     parser.add_argument("--eval_train", action="store_true", help="Also report teacher-forced metrics on train windows.")
-    parser.add_argument("--rollout_length", type=int, default=64)
-    parser.add_argument("--rollout_loss_weight", type=float, default=0.1)
-    parser.add_argument("--scheduled_sampling_max", type=float, default=0.20)
+    parser.add_argument("--homopolymer_loss_weight", type=float, default=0.1)
+    parser.add_argument("--homopolymer_min_run", type=int, default=8)
     parser.add_argument("--free_eval_windows", type=int, default=8)
     parser.add_argument("--free_eval_prompt_length", type=int, default=512)
     parser.add_argument("--free_eval_generate_length", type=int, default=64)
-    parser.add_argument("--repetition_penalty", type=float, default=1.0)
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
     parser.add_argument("--seed", type=int, default=13)
     return parser.parse_args()
 
@@ -388,63 +380,52 @@ def unpack_batch(batch, device):
     )
 
 
-def scheduled_sampling_for_epoch(epoch_offset: int, total_epochs: int, max_probability: float) -> float:
-    if total_epochs <= 1:
-        return 0.0
-    return max_probability * epoch_offset / max(1, total_epochs - 1)
-
-
-def recurrent_rollout_loss(
-    model: S4ProteinModel,
+def homopolymer_end_loss(
+    logits: torch.Tensor,
     input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    rollout_length: int,
-    scheduled_sampling_probability: float,
-) -> torch.Tensor:
-    if rollout_length <= 0:
-        return input_ids.new_tensor(0.0, dtype=torch.float)
+    target_ids: torch.Tensor,
+    loss_mask: torch.Tensor,
+    base_token_ids: set[int],
+    min_run: int,
+) -> tuple[torch.Tensor, int]:
+    if min_run < 2:
+        raise ValueError("homopolymer_min_run must be at least 2")
 
-    losses = []
-    batch_size = input_ids.size(0)
-    for batch_idx in range(batch_size):
-        seq_len = int(attention_mask[batch_idx].sum().item())
-        if seq_len < 3:
-            continue
+    inputs = input_ids.detach().cpu()
+    targets = target_ids.detach().cpu()
+    scored = loss_mask.detach().cpu().bool()
+    selected = torch.zeros_like(scored)
 
-        sequence = input_ids[batch_idx, :seq_len]
-        prompt_len = max(1, seq_len - rollout_length)
-        targets = sequence[prompt_len:]
-        if targets.numel() == 0:
-            continue
+    for batch_idx in range(inputs.size(0)):
+        previous = None
+        run_length = 0
+        for pos in range(inputs.size(1)):
+            token = int(inputs[batch_idx, pos])
+            if token not in base_token_ids:
+                previous = None
+                run_length = 0
+                continue
+            if token == previous:
+                run_length += 1
+            else:
+                previous = token
+                run_length = 1
+            if (
+                run_length >= min_run
+                and bool(scored[batch_idx, pos])
+                and int(targets[batch_idx, pos]) != token
+            ):
+                selected[batch_idx, pos] = True
 
-        states = [block.default_state(1, input_ids.device) for block in model.blocks]
-        for token in sequence[:prompt_len]:
-            x = model.embed(token.view(1))
-            for block_idx, block in enumerate(model.blocks):
-                x, states[block_idx] = block.step(x, states[block_idx])
+    position_count = int(selected.sum().item())
+    if position_count == 0:
+        return logits.sum() * 0.0, 0
 
-        for target in targets:
-            logits = model.lm_head(model.ln_f(x))
-            losses.append(
-                torch.nn.functional.cross_entropy(
-                    logits,
-                    target.view(1),
-                    reduction="mean",
-                )
-            )
-            predicted = logits.argmax(dim=-1).detach()
-            use_prediction = (
-                scheduled_sampling_probability > 0
-                and torch.rand((), device=input_ids.device).item() < scheduled_sampling_probability
-            )
-            next_token = predicted if use_prediction else target.view(1)
-            x = model.embed(next_token)
-            for block_idx, block in enumerate(model.blocks):
-                x, states[block_idx] = block.step(x, states[block_idx])
-
-    if not losses:
-        return input_ids.new_tensor(0.0, dtype=torch.float)
-    return torch.stack(losses).mean()
+    selected = selected.to(logits.device)
+    repeat_ids = input_ids[selected].unsqueeze(-1)
+    repeat_probabilities = logits[selected].softmax(dim=-1).gather(-1, repeat_ids).squeeze(-1)
+    penalty = -torch.log((1.0 - repeat_probabilities).clamp_min(1e-6)).mean()
+    return penalty, position_count
 
 
 def train_one_epoch(
@@ -453,36 +434,51 @@ def train_one_epoch(
     optimizer,
     device,
     grad_clip,
-    rollout_length,
-    rollout_loss_weight,
-    scheduled_sampling_probability,
+    tokenizer,
+    homopolymer_loss_weight,
+    homopolymer_min_run,
 ):
     model.train()
     total_loss = 0.0
+    total_homopolymer_loss = 0.0
+    homopolymer_batches = 0
+    homopolymer_positions = 0
+    base_token_ids = {tokenizer.vocab[base] for base in "ACGT"}
     for batch in tqdm(loader, desc="Train"):
         input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
+        logits = model(input_ids, attention_mask=attention_mask)
         loss = model.compute_loss(
             input_ids,
             target_ids,
             attention_mask,
             loss_mask=loss_mask,
             objective="autocomplete",
+            logits=logits,
         )
-        if rollout_loss_weight > 0 and rollout_length > 0:
-            rollout_loss = recurrent_rollout_loss(
-                model,
+        if homopolymer_loss_weight > 0:
+            homopolymer_loss, position_count = homopolymer_end_loss(
+                logits,
                 input_ids,
-                attention_mask,
-                rollout_length,
-                scheduled_sampling_probability,
+                target_ids,
+                loss_mask,
+                base_token_ids,
+                homopolymer_min_run,
             )
-            loss = loss + rollout_loss_weight * rollout_loss
+            loss = loss + homopolymer_loss_weight * homopolymer_loss
+            if position_count > 0:
+                total_homopolymer_loss += homopolymer_loss.item()
+                homopolymer_batches += 1
+                homopolymer_positions += position_count
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         total_loss += loss.item()
-    return total_loss / max(1, len(loader))
+    return {
+        "loss": total_loss / max(1, len(loader)),
+        "homopolymer_loss": total_homopolymer_loss / max(1, homopolymer_batches),
+        "homopolymer_positions": homopolymer_positions,
+    }
 
 
 @torch.no_grad()
@@ -521,36 +517,6 @@ def evaluate(model, loader, device):
         "top3": correct_top3 / total if total else 0.0,
         "tokens": total,
     }
-
-
-@torch.no_grad()
-def generate_sample(model, tokenizer, prompt, args, device):
-    prompt_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
-    out = model.generate(
-        prompt_ids,
-        max_new_tokens=args.generate_length,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        do_sample=not args.greedy,
-        eos_token_id=tokenizer.eos_token_id,
-        stop_at_eos=True,
-        forbidden_token_ids=(tokenizer.pad_token_id, tokenizer.unk_token_id),
-        repetition_penalty=args.repetition_penalty,
-        no_repeat_ngram_size=args.no_repeat_ngram_size,
-        min_new_tokens=min(20, args.generate_length),
-    )
-    return tokenizer.decode(out[0].tolist(), stop_at_eos=True)
-
-
-def continuation_accuracy(prompt: str, generated: str, reference: str) -> Optional[float]:
-    generated_suffix = generated[len(prompt):]
-    if not generated_suffix:
-        return None
-    reference_suffix = reference[len(prompt) : len(prompt) + len(generated_suffix)]
-    if len(reference_suffix) != len(generated_suffix):
-        return None
-    matches = sum(a == b for a, b in zip(generated_suffix, reference_suffix))
-    return matches / len(generated_suffix)
 
 
 def longest_run(sequence: str) -> int:
@@ -599,14 +565,9 @@ def free_generation_metrics(
         output = model.generate(
             prompt_ids,
             max_new_tokens=current_generate_length,
-            temperature=1.0,
-            top_k=None,
-            do_sample=False,
             eos_token_id=tokenizer.eos_token_id,
             stop_at_eos=False,
             forbidden_token_ids=tuple(forbidden),
-            repetition_penalty=1.0,
-            no_repeat_ngram_size=0,
             min_new_tokens=current_generate_length,
         )
         generated = output[0, current_prompt_length : current_prompt_length + current_generate_length].tolist()
@@ -732,9 +693,8 @@ def main():
     print(f"  Model variant: {args.model_variant}")
     if args.model_variant == "s4d_v2":
         print(f"  SSM learning rate: {args.lr if args.ssm_lr is None else args.ssm_lr}")
-    print(f"  Rollout length: {args.rollout_length}")
-    print(f"  Rollout loss weight: {args.rollout_loss_weight}")
-    print(f"  Scheduled sampling max: {args.scheduled_sampling_max}")
+    print(f"  Homopolymer loss weight: {args.homopolymer_loss_weight}")
+    print(f"  Homopolymer minimum run: {args.homopolymer_min_run}")
     print(f"  Free eval windows: {args.free_eval_windows}")
     if args.resume:
         print(f"  Resume: {args.resume} starting at epoch {start_epoch}")
@@ -742,22 +702,17 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     for epoch in range(start_epoch, start_epoch + args.epochs):
-        epoch_offset = epoch - start_epoch
-        scheduled_sampling_probability = scheduled_sampling_for_epoch(
-            epoch_offset,
-            args.epochs,
-            args.scheduled_sampling_max,
-        )
-        train_loss = train_one_epoch(
+        train_epoch_metrics = train_one_epoch(
             model,
             train_loader,
             optimizer,
             device,
             args.grad_clip,
-            args.rollout_length,
-            args.rollout_loss_weight,
-            scheduled_sampling_probability,
+            tokenizer,
+            args.homopolymer_loss_weight,
+            args.homopolymer_min_run,
         )
+        train_loss = train_epoch_metrics["loss"]
         train_metrics = evaluate(model, train_loader, device) if args.eval_train else None
         metrics = evaluate(model, val_loader, device)
         free_metrics = free_generation_metrics(
@@ -780,7 +735,6 @@ def main():
             "best_val_loss": best_val,
             "best_free_score": min(best_free, free_metrics["score"]),
             "free_generation_metrics": free_metrics,
-            "scheduled_sampling_probability": scheduled_sampling_probability,
             "tokenizer_vocab": tokenizer.vocab,
             "model_config": {
                 "vocab_size": tokenizer.vocab_size,
@@ -791,9 +745,8 @@ def main():
                 "model_variant": model.model_variant,
                 "eos_token_id": tokenizer.eos_token_id,
                 "l_max": args.l_max,
-                "rollout_length": args.rollout_length,
-                "rollout_loss_weight": args.rollout_loss_weight,
-                "scheduled_sampling_max": args.scheduled_sampling_max,
+                "homopolymer_loss_weight": args.homopolymer_loss_weight,
+                "homopolymer_min_run": args.homopolymer_min_run,
             },
         }
         torch.save(save, os.path.join(args.output_dir, "last.pt"))
@@ -812,7 +765,8 @@ def main():
             f"top3={metrics['top3']:.4f} "
             f"free_acc={free_metrics['accuracy']:.4f} "
             f"free_longest_run={free_metrics['longest_generated_run']} "
-            f"sched_sample={scheduled_sampling_probability:.3f}"
+            f"hpoly_loss={train_epoch_metrics['homopolymer_loss']:.4f} "
+            f"hpoly_positions={train_epoch_metrics['homopolymer_positions']}"
         )
         if train_metrics is not None:
             line += (
@@ -821,15 +775,7 @@ def main():
             )
         print(line)
 
-    prompt = train_dataset.first_sequence[: args.prompt_length]
-    generated = generate_sample(model, tokenizer, prompt, args, device)
-    exact_acc = continuation_accuracy(prompt, generated, train_dataset.first_sequence)
     print()
-    print("Prompt header:", train_dataset.first_header)
-    print("Prompt:", prompt)
-    print("Generated:", generated)
-    if exact_acc is not None:
-        print(f"Exact continuation accuracy: {exact_acc:.4f}")
     print("Saved:", os.path.join(args.output_dir, "best_loss.pt"))
 
 

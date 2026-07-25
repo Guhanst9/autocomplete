@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 
 try:
-    from src.models.s4.s4_kernel import SSKernelDiag
+    from src.models.s4.s4_kernel import SSKernelDiag, SSKernelNPLR
 except ImportError:
-    from .s4_kernel import SSKernelDiag
+    from .s4_kernel import SSKernelDiag, SSKernelNPLR
 
 
 def fft_conv(u: torch.Tensor, K: torch.Tensor, dropout_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -44,15 +44,16 @@ class S4Layer(nn.Module):
 
         if model_variant not in {"legacy", "s4d_v2"}:
             raise ValueError("model_variant must be 'legacy' or 's4d_v2'")
-        if kernel_type != "diag":
-            raise ValueError("active model only supports kernel_type='diag'")
+        if model_variant == "s4d_v2" and kernel_type != "diag":
+            raise ValueError("s4d_v2 requires kernel_type='diag'")
 
-        self.kernel = SSKernelDiag(
-            d_model=d_model,
-            d_state=d_state,
-            l_max=l_max,
-            trainable_a_imag=model_variant == "s4d_v2",
-        )
+        kernel_cls = SSKernelDiag if kernel_type == "diag" else SSKernelNPLR
+        kwargs = dict(d_model=d_model, d_state=d_state, l_max=l_max)
+        if kernel_type == "diag":
+            kwargs["trainable_a_imag"] = model_variant == "s4d_v2"
+        if kernel_type == "nplr":
+            kwargs["rank"] = 1
+        self.kernel = kernel_cls(**kwargs)
 
         self.dropout = nn.Dropout(dropout)
         self.D_skip = nn.Parameter(torch.randn(d_model) * 0.01)

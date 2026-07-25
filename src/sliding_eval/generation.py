@@ -1,6 +1,4 @@
 from itertools import groupby
-from typing import Optional
-
 import torch
 from tqdm import tqdm
 
@@ -67,12 +65,6 @@ def generate_windows(
     checkpoint: str,
     generate_length: int,
     batch_size: int,
-    do_sample: bool,
-    temperature: float,
-    top_k: Optional[int],
-    repetition_penalty: float,
-    no_repeat_ngram_size: Optional[int],
-    decoding_mode: str,
     seed: int,
 ) -> None:
     model, tokenizer, device = load_model(checkpoint)
@@ -88,27 +80,20 @@ def generate_windows(
         ]
         if "N" in tokenizer.vocab:
             forbidden.append(tokenizer.vocab["N"])
-        output, diagnostics = model.generate(
+        output = model.generate(
             prompt_tensor,
             max_new_tokens=generate_length,
-            temperature=temperature,
-            top_k=top_k,
-            do_sample=do_sample,
             eos_token_id=tokenizer.eos_token_id,
             stop_at_eos=False,
             forbidden_token_ids=tuple(forbidden),
-            repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=no_repeat_ngram_size,
             min_new_tokens=generate_length,
-            return_diagnostics=True,
         )
-        for index, (window, token_ids) in enumerate(zip(batch, output.tolist())):
+        for window, token_ids in zip(batch, output.tolist()):
             decoded = tokenizer.decode(token_ids, stop_at_eos=False)
             window.generated_suffix = decoded[len(window.prompt) : len(window.prompt) + generate_length]
             window.generated_length = len(window.generated_suffix)
             window.accuracy_percent = exact_identity_percent(window.generated_suffix, window.true_suffix)
-            window.decoding_mode = decoding_mode
-            window.fallback_count = diagnostics.fallback_counts[index]
+            window.decoding_mode = "raw_greedy"
             window.longest_generated_run = longest_homopolymer_run(window.generated_suffix)
             window.n_count = window.generated_suffix.count("N")
             window.gc_difference_percent = gc_difference_percent(

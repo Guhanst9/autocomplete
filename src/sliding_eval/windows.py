@@ -21,7 +21,6 @@ class SlidingWindow:
     generated_length: int | None = None
     accuracy_percent: float | None = None
     decoding_mode: str = ""
-    fallback_count: int | None = None
     longest_generated_run: int | None = None
     n_count: int | None = None
     gc_difference_percent: float | None = None
@@ -130,7 +129,6 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
         "generated_length",
         "accuracy_percent",
         "decoding_mode",
-        "fallback_count",
         "longest_generated_run",
         "n_count",
         "gc_difference_percent",
@@ -158,7 +156,6 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
                         "" if window.accuracy_percent is None else f"{window.accuracy_percent:.2f}"
                     ),
                     "decoding_mode": window.decoding_mode,
-                    "fallback_count": "" if window.fallback_count is None else window.fallback_count,
                     "longest_generated_run": (
                         "" if window.longest_generated_run is None else window.longest_generated_run
                     ),
