@@ -1,6 +1,7 @@
 import math
 import os
 import random
+from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Optional
 
@@ -41,9 +42,9 @@ class TrainingPreset:
     recovery_start_probability: float = 0.02
     recovery_max_probability: float = 0.10
     recovery_warmup_epochs: int = 2
-    free_eval_windows: int = 8
+    free_eval_windows: int = 32
     free_eval_prompt_length: int = 512
-    free_eval_generate_length: int = 64
+    free_eval_generate_length: int = 128
 
 
 PRESETS = {
@@ -433,6 +434,42 @@ def longest_run(sequence: str) -> int:
     return best
 
 
+def gc_fraction(sequence: str) -> float:
+    if not sequence:
+        return 0.0
+    return sum(base in {"G", "C"} for base in sequence) / len(sequence)
+
+
+def sequence_entropy(sequence: str) -> float:
+    if not sequence:
+        return 0.0
+    counts = Counter(sequence)
+    entropy = 0.0
+    for count in counts.values():
+        probability = count / len(sequence)
+        entropy -= probability * math.log2(probability)
+    return entropy
+
+
+def kmer_diversity(sequence: str, k: int = 8) -> float:
+    if len(sequence) < k:
+        return 0.0
+    total = len(sequence) - k + 1
+    unique = {sequence[index : index + k] for index in range(total)}
+    return len(unique) / total
+
+
+def quality_score(metrics: dict[str, float]) -> float:
+    if metrics["n_count"] > 0:
+        return float("-inf")
+    return (
+        metrics["accuracy"]
+        - metrics["low_complexity_fraction"]
+        - metrics["runs_over_20_fraction"]
+        - metrics["mean_gc_difference"]
+    )
+
+
 @torch.no_grad()
 def free_generation_metrics(
     model: S4SequenceModel,
@@ -448,6 +485,11 @@ def free_generation_metrics(
     total_bases = 0
     max_generated_run = 0
     total_n = 0
+    total_gc_difference = 0.0
+    total_entropy = 0.0
+    total_kmer_diversity = 0.0
+    runs_over_20 = 0
+    low_complexity = 0
     evaluated = 0
     forbidden = [
         tokenizer.pad_token_id,
@@ -478,19 +520,33 @@ def free_generation_metrics(
         total_matches += sum(int(a == b) for a, b in zip(generated, truth))
         total_bases += len(truth)
         generated_text = tokenizer.decode(generated, stop_at_eos=False)
-        max_generated_run = max(max_generated_run, longest_run(generated_text))
+        truth_text = tokenizer.decode(truth, stop_at_eos=False)
+        generated_run = longest_run(generated_text)
+        generated_kmer_diversity = kmer_diversity(generated_text, k=8)
+        max_generated_run = max(max_generated_run, generated_run)
         total_n += generated_text.count("N")
+        total_gc_difference += abs(gc_fraction(generated_text) - gc_fraction(truth_text))
+        total_entropy += sequence_entropy(generated_text)
+        total_kmer_diversity += generated_kmer_diversity
+        runs_over_20 += int(generated_run > 20)
+        low_complexity += int(generated_kmer_diversity < 0.20)
         evaluated += 1
 
     accuracy = total_matches / total_bases if total_bases else 0.0
-    return {
+    metrics = {
         "windows": evaluated,
         "bases": total_bases,
         "accuracy": accuracy,
-        "score": 1.0 - accuracy,
         "longest_generated_run": max_generated_run,
         "n_count": total_n,
+        "mean_gc_difference": total_gc_difference / max(1, evaluated),
+        "mean_entropy": total_entropy / max(1, evaluated),
+        "mean_8mer_diversity": total_kmer_diversity / max(1, evaluated),
+        "runs_over_20_fraction": runs_over_20 / max(1, evaluated),
+        "low_complexity_fraction": low_complexity / max(1, evaluated),
     }
+    metrics["quality_score"] = quality_score(metrics)
+    return metrics
 
 
 def assert_resume_matches_preset(checkpoint: dict, preset: TrainingPreset) -> None:
@@ -596,7 +652,7 @@ def run_training(
     optimizer = build_optimizer(model, preset.lr, preset.weight_decay)
     start_epoch = 0
     best_val = float("inf")
-    best_free = float("inf")
+    best_quality = float("-inf")
 
     if resume:
         ckpt = resume_checkpoint
@@ -605,7 +661,7 @@ def run_training(
             optimizer.load_state_dict(ckpt["optimizer"])
         start_epoch = ckpt.get("epoch", -1) + 1
         best_val = ckpt.get("best_val_loss", best_val)
-        best_free = ckpt.get("best_free_score", best_free)
+        best_quality = ckpt.get("best_quality_score", ckpt.get("quality_score", best_quality))
 
     print("DNA S4D run")
     print(f"  Device: {device}")
@@ -660,7 +716,7 @@ def run_training(
             "preset_config": asdict(preset),
             "holdout_accession": holdout_accession,
             "best_val_loss": best_val,
-            "best_free_score": min(best_free, free_metrics["score"]),
+            "best_quality_score": max(best_quality, free_metrics["quality_score"]),
             "free_generation_metrics": free_metrics,
             "recovery_settings": {
                 "enabled": preset.recovery_enabled,
@@ -693,10 +749,14 @@ def run_training(
         torch.save(save, os.path.join(output_dir, "last.pt"))
         if is_best or not os.path.exists(os.path.join(output_dir, "best_loss.pt")):
             torch.save(save, os.path.join(output_dir, "best_loss.pt"))
-        if free_metrics["score"] < best_free or not os.path.exists(os.path.join(output_dir, "best_free.pt")):
-            best_free = free_metrics["score"]
-            save["best_free_score"] = best_free
-            torch.save(save, os.path.join(output_dir, "best_free.pt"))
+        if (
+            free_metrics["quality_score"] > best_quality
+            or not os.path.exists(os.path.join(output_dir, "best_quality.pt"))
+        ):
+            best_quality = free_metrics["quality_score"]
+            save["best_quality_score"] = best_quality
+            if best_quality != float("-inf"):
+                torch.save(save, os.path.join(output_dir, "best_quality.pt"))
         print(
             f"Epoch {epoch} "
             f"train_loss={train_loss:.4f} "
@@ -710,6 +770,10 @@ def run_training(
             f"top3={metrics['top3']:.4f} "
             f"free_acc={free_metrics['accuracy']:.4f} "
             f"free_longest_run={free_metrics['longest_generated_run']} "
+            f"free_gc_diff={100 * free_metrics['mean_gc_difference']:.2f}pp "
+            f"free_low_complexity={free_metrics['low_complexity_fraction']:.4f} "
+            f"free_runs_gt20={free_metrics['runs_over_20_fraction']:.4f} "
+            f"quality_score={free_metrics['quality_score']:.4f} "
             f"hpoly_loss={train_epoch_metrics['homopolymer_loss']:.4f} "
             f"hpoly_positions={train_epoch_metrics['homopolymer_positions']}"
         )
