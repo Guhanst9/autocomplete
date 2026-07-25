@@ -35,8 +35,12 @@ class TrainingPreset:
     grad_clip: float = 1.0
     prefix_min_fraction: float = 0.25
     prefix_max_fraction: float = 0.70
-    homopolymer_loss_weight: float = 0.1
+    homopolymer_loss_weight: float = 0.02
     homopolymer_min_run: int = 8
+    recovery_loss_weight: float = 0.25
+    recovery_start_probability: float = 0.02
+    recovery_max_probability: float = 0.10
+    recovery_warmup_epochs: int = 2
     free_eval_windows: int = 8
     free_eval_prompt_length: int = 512
     free_eval_generate_length: int = 64
@@ -211,6 +215,84 @@ def homopolymer_end_loss(
     return penalty, position_count
 
 
+def recovery_probability_for_epoch(epoch_offset: int, preset: TrainingPreset) -> float:
+    if not preset.recovery_enabled:
+        return 0.0
+    if preset.recovery_warmup_epochs <= 0:
+        return preset.recovery_max_probability
+    progress = min(max(epoch_offset, 0), preset.recovery_warmup_epochs) / preset.recovery_warmup_epochs
+    return preset.recovery_start_probability + (
+        preset.recovery_max_probability - preset.recovery_start_probability
+    ) * progress
+
+
+def build_recovery_batch(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+    logits: torch.Tensor,
+    tokenizer: DnaTokenizer,
+    corruption_probability: float,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    if corruption_probability <= 0:
+        empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        return input_ids, empty_mask, 0, 0
+
+    base_token_ids = torch.tensor(
+        [tokenizer.vocab[base] for base in "ACGT"],
+        device=input_ids.device,
+        dtype=input_ids.dtype,
+    )
+    is_base = (input_ids.unsqueeze(-1) == base_token_ids).any(dim=-1)
+
+    suffix_token_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+    suffix_token_mask[:, 1:] = loss_mask[:, :-1].bool()
+    eligible = is_base & attention_mask.bool() & suffix_token_mask
+
+    random_mask = torch.rand(input_ids.shape, device=input_ids.device) < corruption_probability
+    selected = eligible & random_mask
+    if not selected.any().item():
+        empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        return input_ids, empty_mask, 0, int(eligible.sum().item())
+
+    base_logits = logits.detach().clone()
+    allowed = torch.zeros(base_logits.size(-1), dtype=torch.bool, device=base_logits.device)
+    allowed[base_token_ids.long()] = True
+    base_logits[..., ~allowed] = -1e10
+    predicted_at_position = base_logits.argmax(dim=-1)
+
+    shifted_prediction = input_ids.clone()
+    shifted_prediction[:, 1:] = predicted_at_position[:, :-1]
+    changed = selected & (shifted_prediction != input_ids)
+
+    corrupted_ids = input_ids.clone()
+    corrupted_ids[changed] = shifted_prediction[changed]
+
+    history_has_corruption = changed.long().cumsum(dim=1).bool()
+    recovery_mask = loss_mask.bool() & history_has_corruption
+    return corrupted_ids, recovery_mask, int(changed.sum().item()), int(eligible.sum().item())
+
+
+def masked_autocomplete_loss(
+    model: S4SequenceModel,
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+) -> torch.Tensor:
+    if not loss_mask.bool().any().item():
+        return logits.sum() * 0.0
+    return model.compute_loss(
+        input_ids,
+        target_ids,
+        attention_mask,
+        loss_mask=loss_mask,
+        objective="autocomplete",
+        logits=logits,
+    )
+
+
 def train_one_epoch(
     model,
     loader,
@@ -218,25 +300,57 @@ def train_one_epoch(
     device,
     preset: TrainingPreset,
     tokenizer: DnaTokenizer,
+    epoch_offset: int,
 ):
     model.train()
     total_loss = 0.0
+    total_clean_loss = 0.0
+    total_recovery_loss = 0.0
     total_homopolymer_loss = 0.0
     homopolymer_batches = 0
     homopolymer_positions = 0
+    recovery_batches = 0
+    corrupted_tokens = 0
+    eligible_recovery_tokens = 0
     base_token_ids = {tokenizer.vocab[base] for base in "ACGT"}
+    recovery_probability = recovery_probability_for_epoch(epoch_offset, preset)
     for batch in tqdm(loader, desc="Train"):
         input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
         logits = model(input_ids, attention_mask=attention_mask)
-        loss = model.compute_loss(
+        clean_loss = masked_autocomplete_loss(
+            model,
+            logits,
             input_ids,
             target_ids,
             attention_mask,
-            loss_mask=loss_mask,
-            objective="autocomplete",
-            logits=logits,
+            loss_mask,
         )
+        loss = clean_loss
+        recovery_loss = logits.sum() * 0.0
+        if preset.recovery_enabled:
+            corrupted_ids, recovery_mask, changed_count, eligible_count = build_recovery_batch(
+                input_ids,
+                attention_mask,
+                loss_mask,
+                logits,
+                tokenizer,
+                recovery_probability,
+            )
+            corrupted_tokens += changed_count
+            eligible_recovery_tokens += eligible_count
+            if recovery_mask.any().item():
+                recovery_logits = model(corrupted_ids, attention_mask=attention_mask)
+                recovery_loss = masked_autocomplete_loss(
+                    model,
+                    recovery_logits,
+                    corrupted_ids,
+                    target_ids,
+                    attention_mask,
+                    recovery_mask.long(),
+                )
+                loss = loss + preset.recovery_loss_weight * recovery_loss
+                recovery_batches += 1
         if preset.homopolymer_loss_weight > 0:
             homopolymer_loss, position_count = homopolymer_end_loss(
                 logits,
@@ -255,8 +369,15 @@ def train_one_epoch(
         torch.nn.utils.clip_grad_norm_(model.parameters(), preset.grad_clip)
         optimizer.step()
         total_loss += loss.item()
+        total_clean_loss += clean_loss.item()
+        total_recovery_loss += recovery_loss.item()
     return {
         "loss": total_loss / max(1, len(loader)),
+        "clean_loss": total_clean_loss / max(1, len(loader)),
+        "recovery_loss": total_recovery_loss / max(1, len(loader)),
+        "recovery_probability": recovery_probability,
+        "recovery_batches": recovery_batches,
+        "corrupted_token_fraction": corrupted_tokens / max(1, eligible_recovery_tokens),
         "homopolymer_loss": total_homopolymer_loss / max(1, homopolymer_batches),
         "homopolymer_positions": homopolymer_positions,
     }
@@ -514,6 +635,7 @@ def run_training(
             device,
             preset,
             tokenizer,
+            epoch - start_epoch,
         )
         train_loss = train_epoch_metrics["loss"]
         metrics = evaluate(model, val_loader, device)
@@ -540,6 +662,14 @@ def run_training(
             "best_val_loss": best_val,
             "best_free_score": min(best_free, free_metrics["score"]),
             "free_generation_metrics": free_metrics,
+            "recovery_settings": {
+                "enabled": preset.recovery_enabled,
+                "loss_weight": preset.recovery_loss_weight,
+                "start_probability": preset.recovery_start_probability,
+                "max_probability": preset.recovery_max_probability,
+                "warmup_epochs": preset.recovery_warmup_epochs,
+                "current_probability": train_epoch_metrics["recovery_probability"],
+            },
             "tokenizer_vocab": tokenizer.vocab,
             "model_config": {
                 "vocab_size": tokenizer.vocab_size,
@@ -553,6 +683,11 @@ def run_training(
                 "dropout": preset.dropout,
                 "homopolymer_loss_weight": preset.homopolymer_loss_weight,
                 "homopolymer_min_run": preset.homopolymer_min_run,
+                "recovery_enabled": preset.recovery_enabled,
+                "recovery_loss_weight": preset.recovery_loss_weight,
+                "recovery_start_probability": preset.recovery_start_probability,
+                "recovery_max_probability": preset.recovery_max_probability,
+                "recovery_warmup_epochs": preset.recovery_warmup_epochs,
             },
         }
         torch.save(save, os.path.join(output_dir, "last.pt"))
@@ -565,6 +700,10 @@ def run_training(
         print(
             f"Epoch {epoch} "
             f"train_loss={train_loss:.4f} "
+            f"clean_loss={train_epoch_metrics['clean_loss']:.4f} "
+            f"recovery_loss={train_epoch_metrics['recovery_loss']:.4f} "
+            f"recovery_p={train_epoch_metrics['recovery_probability']:.3f} "
+            f"corrupt_frac={train_epoch_metrics['corrupted_token_fraction']:.4f} "
             f"val_loss={metrics['loss']:.4f} "
             f"val_ppl={metrics['perplexity']:.3f} "
             f"top1={metrics['top1']:.4f} "
