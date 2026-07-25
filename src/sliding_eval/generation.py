@@ -2,41 +2,8 @@ from itertools import groupby
 import torch
 from tqdm import tqdm
 
-from run_plastid import tokenizer_from_checkpoint
-from src.models.s4_model import S4ProteinModel
+from src.dna.checkpoint import load_model
 from src.sliding_eval.windows import SlidingWindow
-
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def load_model(checkpoint: str):
-    device = get_device()
-    ckpt = torch.load(checkpoint, map_location=device)
-    tokenizer = tokenizer_from_checkpoint(ckpt)
-    config = ckpt.get("model_config", {})
-    model = S4ProteinModel(
-        vocab_size=tokenizer.vocab_size,
-        d_model=config.get("d_model", 448),
-        d_state=config.get("d_state", 64),
-        n_layers=config.get("n_layers", 10),
-        kernel_type=config.get("kernel_type", "diag"),
-        bidirectional=False,
-        model_variant=config.get("model_variant", "legacy"),
-        l_max=config.get("l_max"),
-        pad_token_id=tokenizer.pad_token_id,
-        mask_token_id=tokenizer.unk_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        max_length=config.get("l_max", 1024),
-    ).to(device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
-    model.eval()
-    return model, tokenizer, device
 
 
 def exact_identity_percent(generated: str, expected: str) -> float:

@@ -1,6 +1,7 @@
 import torch
 
-from run_plastid import PlastidTokenizer, homopolymer_end_loss
+from src.dna.data import DnaTokenizer as PlastidTokenizer
+from src.dna.training import homopolymer_end_loss
 
 
 def test_penalty_targets_the_end_of_a_long_run():

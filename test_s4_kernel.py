@@ -2,10 +2,10 @@ import io
 
 import torch
 
-from run_plastid import build_optimizer
+from src.dna.training import build_optimizer
 from src.models.s4.s4_kernel import SSKernelDiag
 from src.models.s4.s4_layer import S4Layer
-from src.models.s4_model import S4ProteinModel
+from src.models.s4_model import S4SequenceModel
 
 
 def test_s4_diagonal():
@@ -75,7 +75,7 @@ def test_s4d_numerical_stability():
 def test_causal_forward_pass():
     print("testing causal forward pass...")
     torch.manual_seed(0)
-    model = S4ProteinModel(
+    model = S4SequenceModel(
         vocab_size=8,
         d_model=16,
         d_state=8,
@@ -111,7 +111,7 @@ def test_checkpoint_reload():
         "kernel_type": "diag",
         "l_max": 64,
     }
-    model = S4ProteinModel(
+    model = S4SequenceModel(
         **config,
         dropout=0.0,
         bidirectional=False,
@@ -127,7 +127,7 @@ def test_checkpoint_reload():
     torch.save({"model_config": config, "model_state_dict": model.state_dict()}, buffer)
     buffer.seek(0)
     checkpoint = torch.load(buffer, map_location="cpu")
-    restored = S4ProteinModel(
+    restored = S4SequenceModel(
         **checkpoint["model_config"],
         dropout=0.0,
         bidirectional=False,
@@ -145,7 +145,7 @@ def test_checkpoint_reload():
 
 def test_s4d_v2_parameters_and_optimizer():
     print("testing s4d v2 parameters and optimizer...")
-    model = S4ProteinModel(
+    model = S4SequenceModel(
         vocab_size=8,
         d_model=16,
         d_state=8,

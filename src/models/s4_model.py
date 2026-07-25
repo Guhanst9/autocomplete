@@ -19,7 +19,7 @@ def _get_config(size: str) -> dict:
     return {}
 
 
-class S4ProteinModel(nn.Module):
+class S4SequenceModel(nn.Module):
     def __init__(
         self,
         vocab_size: int = 23,
@@ -276,7 +276,7 @@ class S4ProteinModel(nn.Module):
         return output
 
     @classmethod
-    def from_preset(cls, size: str, **kwargs) -> "S4ProteinModel":
+    def from_preset(cls, size: str, **kwargs) -> "S4SequenceModel":
         cfg = _get_config(size)
         cfg.update(kwargs)
         return cls(**cfg)
@@ -316,3 +316,6 @@ def adapt_state_dict_vocab(state_dict: dict, vocab_size: int) -> dict:
         resized[:rows] = weight[:rows]
         state_dict[key] = resized
     return state_dict
+
+
+S4ProteinModel = S4SequenceModel
