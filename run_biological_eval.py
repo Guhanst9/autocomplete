@@ -4,6 +4,7 @@ from src.biological_eval.annotations import run_annotations
 from src.biological_eval.config import load_config
 from src.biological_eval.features import run_features
 from src.biological_eval.context_topk import run_context, run_topk
+from src.biological_eval.ir import run_ir
 from src.biological_eval.baseline import run_baseline_check
 from src.biological_eval.prepare import run_prepare
 from src.biological_eval.sliding import run_sliding
@@ -28,6 +29,7 @@ def parse_args() -> argparse.Namespace:
             "features",
             "context",
             "topk",
+            "ir",
         ),
         required=True,
     )
@@ -84,6 +86,15 @@ def main() -> None:
             args.reports_dir,
             max_genomes=args.max_genomes,
             max_targets=args.max_windows,
+        )
+    elif args.stage == "ir":
+        run_ir(
+            config,
+            args.output_dir,
+            args.reports_dir,
+            max_genomes=args.max_genomes,
+            max_pairs=args.max_windows,
+            seeds_value=args.seeds,
         )
 
 
