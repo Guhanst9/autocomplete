@@ -1,3 +1,5 @@
+import _path  # noqa: F401
+
 import unittest
 
 from Bio.Seq import Seq

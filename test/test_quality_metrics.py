@@ -1,3 +1,5 @@
+import _path  # noqa: F401
+
 from src.dna.training import (
     gc_fraction,
     kmer_diversity,

@@ -1,3 +1,5 @@
+import _path  # noqa: F401
+
 from dataclasses import replace
 
 import torch

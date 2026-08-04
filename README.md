@@ -151,6 +151,16 @@ Model limitations:
 The model predicts DNA bases from local sequence context. It is not explicitly gene-aware, does not know reading frames during generation, and was trained on 1,024-base windows. Long-range plastome organization should be treated as exploratory.
 ```
 
+## Tests
+
+Permanent tests are in `test/`. Run them with:
+
+```bash
+python -m unittest discover -s test -p "test_*.py"
+```
+
+The ignored `tests/` directory is only for temporary experiment outputs and checkpoint smoke runs.
+
 ## Train
 
 ```bash

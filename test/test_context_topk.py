@@ -1,3 +1,5 @@
+import _path  # noqa: F401
+
 import unittest
 
 from src.biological_eval.context_topk import parse_int_list, target_starts

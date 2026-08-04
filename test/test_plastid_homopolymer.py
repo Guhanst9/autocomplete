@@ -1,3 +1,5 @@
+import _path  # noqa: F401
+
 import torch
 
 from src.dna.data import DnaTokenizer as PlastidTokenizer
