@@ -3,6 +3,7 @@ import argparse
 from src.biological_eval.annotations import run_annotations
 from src.biological_eval.config import load_config
 from src.biological_eval.features import run_features
+from src.biological_eval.context_topk import run_context, run_topk
 from src.biological_eval.baseline import run_baseline_check
 from src.biological_eval.prepare import run_prepare
 from src.biological_eval.sliding import run_sliding
@@ -18,13 +19,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument(
         "--stage",
-        choices=("prepare", "baseline-check", "annotations", "sliding", "summarize", "features"),
+        choices=(
+            "prepare",
+            "baseline-check",
+            "annotations",
+            "sliding",
+            "summarize",
+            "features",
+            "context",
+            "topk",
+        ),
         required=True,
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--reports-dir", default="reports/plastid_eval")
     parser.add_argument("--max-genomes", type=int, default=None)
     parser.add_argument("--max-windows", type=int, default=None)
+    parser.add_argument("--context-lengths", default=None)
     parser.add_argument("--seeds", default=None)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -57,6 +68,23 @@ def main() -> None:
         run_summarize(args.output_dir, args.reports_dir)
     elif args.stage == "features":
         run_features(args.output_dir, args.reports_dir)
+    elif args.stage == "context":
+        run_context(
+            config,
+            args.output_dir,
+            max_genomes=args.max_genomes,
+            max_targets=args.max_windows,
+            seeds_value=args.seeds,
+            context_lengths_value=args.context_lengths,
+        )
+    elif args.stage == "topk":
+        run_topk(
+            config,
+            args.output_dir,
+            args.reports_dir,
+            max_genomes=args.max_genomes,
+            max_targets=args.max_windows,
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,3 @@
+accession,target_start,bases,top1_accuracy_percent,top2_accuracy_percent,mean_true_base_probability,base_frequency_baseline_percent,baseline_base
+NC_053550.1,512,512,96.68,99.80,0.9517,25.20,T
+NC_053550.1,768,512,96.48,100.00,0.9514,22.27,T
