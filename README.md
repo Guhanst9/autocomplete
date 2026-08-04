@@ -25,7 +25,7 @@ Current checkpoint SHA-256:
 Checkpoint download link:
 
 ```text
-TODO: add Google Drive or Dropbox link for best_loss.pt
+https://drive.google.com/file/d/1YhBM-c4PJO7YPhhe2_aPvqxKcC2M3UeJ/view
 ```
 
 Do not commit model checkpoints or full FASTA files. The full training FASTA is hundreds of MB and should stay local.
