@@ -1,0 +1,74 @@
+{
+  "project": "plastid_s4d_evaluation",
+  "checkpoint": "outputs/plastid_s4d_v2_recovery_full/best_loss.pt",
+  "raw_fasta": "data/plastid/refseq_full/refseq_plastids_all.fna.gz",
+  "clean_fasta": "data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz",
+  "holdout_accession": "NC_053550.1",
+  "prompt_length": 512,
+  "generation_length": 512,
+  "stride": 256,
+  "circular": true,
+  "primary_decoding": {
+    "mode": "sampled",
+    "temperature": 0.8,
+    "seed": 13
+  },
+  "repeat_sample_seeds": [13, 29, 47, 71, 101],
+  "context_lengths": [128, 256, 512, 1024],
+  "baseline_csvs": {
+    "greedy": "outputs/plastid_s4d_v2_recovery_full_rosa_eval_best_loss/NC_053550.1_windows.csv",
+    "sampled_t08_seed13": "outputs/plastid_s4d_v2_recovery_full_rosa_eval_best_loss_sampled_t08_seed13/NC_053550.1_windows.csv"
+  },
+  "known_rosa_baseline": {
+    "greedy_accuracy_percent": 59.49,
+    "greedy_runs_over_20": 256,
+    "greedy_max_run": 502,
+    "sampled_t08_accuracy_percent": 56.50,
+    "sampled_t08_runs_over_20": 0,
+    "sampled_t08_max_run": 13
+  },
+  "panel": [
+    {
+      "accession": "NC_053550.1",
+      "name": "Rosa minutifolia",
+      "group": "Rosa",
+      "exposure": "decoding-development"
+    },
+    {
+      "accession": "NC_061264.1",
+      "name": "Rosa odorata var. gigantea",
+      "group": "Rosa",
+      "exposure": "validation"
+    },
+    {
+      "accession": "NC_038102.1",
+      "name": "Rosa chinensis var. spontanea",
+      "group": "Rosa",
+      "exposure": "training"
+    },
+    {
+      "accession": "NC_023110.1",
+      "name": "Helianthus decapetalus",
+      "group": "Sunflower",
+      "exposure": "validation"
+    },
+    {
+      "accession": "NC_030275.1",
+      "name": "Helianthus argophyllus",
+      "group": "Sunflower",
+      "exposure": "training"
+    },
+    {
+      "accession": "NC_027476.1",
+      "name": "Hordeum jubatum",
+      "group": "Grass",
+      "exposure": "validation"
+    },
+    {
+      "accession": "NC_030377.1",
+      "name": "Zea diploperennis",
+      "group": "Grass",
+      "exposure": "training"
+    }
+  ]
+}
