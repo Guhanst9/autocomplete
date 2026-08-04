@@ -2,8 +2,6 @@ import csv
 from pathlib import Path
 from typing import Any
 
-from tqdm import tqdm
-
 from src.biological_eval.config import require_keys
 from src.sliding_eval.fasta import PlastidRecord, stream_fasta
 from src.sliding_eval.generation import generate_windows
@@ -117,7 +115,7 @@ def run_sliding(
     records = load_panel_records(config["raw_fasta"], panel)
     manifest_rows: list[dict[str, Any]] = []
 
-    for item in tqdm(panel, desc="Genomes"):
+    for item in panel:
         accession = item["accession"]
         record = records.get(accession)
         if record is None:
@@ -151,7 +149,6 @@ def run_sliding(
             if csv_path.exists() and not overwrite:
                 status = "skipped-existing"
                 window_count = ""
-                tqdm.write(f"{accession} seed {seed}: skipped existing CSV")
             else:
                 windows = build_windows(
                     record,
@@ -161,10 +158,6 @@ def run_sliding(
                     config["stride"],
                     max_windows=max_windows,
                     circular=bool(config["circular"]),
-                )
-                tqdm.write(
-                    f"{accession} seed {seed}: generating {len(windows)} windows "
-                    f"({decoding_mode}, temperature={temperature})"
                 )
                 generate_windows(
                     windows,
@@ -199,3 +192,4 @@ def run_sliding(
     print(f"  Panel genomes requested: {len(panel)}")
     print(f"  Seeds: {','.join(str(seed) for seed in seeds)}")
     print(f"  Manifest: {manifest_path}")
+
