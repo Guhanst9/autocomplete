@@ -1,0 +1,2 @@
+accession,group,exposure,decoding_mode,seed,rows,avg_accuracy_percent,min_accuracy_percent,max_accuracy_percent,avg_gc_difference_percent,max_longest_generated_run,runs_over_20,n_count
+NC_053550.1,Rosa,decoding-development,sampled,13,2,96.00,95.90,96.09,0.88,5,0,0
