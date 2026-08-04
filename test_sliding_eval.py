@@ -1,8 +1,11 @@
 import csv
 import tempfile
 
+import torch
+
 from src.sliding_eval.fasta import PlastidRecord
 from src.sliding_eval.generation import gc_difference_percent, longest_homopolymer_run
+from src.models.s4_model import _select_next_token
 from src.sliding_eval.windows import SlidingWindow, write_windows_csv
 
 
@@ -43,7 +46,19 @@ def test_csv_diagnostics():
     assert row["gc_difference_percent"] == "25.00"
 
 
+def test_token_selection():
+    logits = torch.tensor([[0.0, 4.0, 1.0]])
+    assert _select_next_token(logits, None).item() == 1
+
+    torch.manual_seed(13)
+    first = _select_next_token(logits, 1.0)
+    torch.manual_seed(13)
+    second = _select_next_token(logits, 1.0)
+    assert torch.equal(first, second)
+
+
 if __name__ == "__main__":
     test_quality_metrics()
     test_csv_diagnostics()
-    print("All sliding evaluation tests passed!")
+    test_token_selection()
+    print("Sliding evaluation tests passed.")

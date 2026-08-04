@@ -84,8 +84,6 @@ class S4SequenceModel(nn.Module):
         logits = self.lm_head(x)
         return logits
 
-
-
     def compute_loss(
         self,
         input_ids: torch.Tensor,
@@ -143,7 +141,10 @@ class S4SequenceModel(nn.Module):
         stop_at_eos: bool = True,
         forbidden_token_ids: Optional[tuple[int, ...]] = None,
         min_new_tokens: int = 0,
+        sampling_temperature: Optional[float] = None,
     ) -> torch.Tensor:
+        if sampling_temperature is not None and sampling_temperature <= 0:
+            raise ValueError("sampling_temperature must be positive")
         eos_token_id = self.eos_token_id if eos_token_id is None else eos_token_id
 
         if use_recurrent:
@@ -154,6 +155,7 @@ class S4SequenceModel(nn.Module):
                 stop_at_eos,
                 forbidden_token_ids,
                 min_new_tokens,
+                sampling_temperature,
             )
         return self._generate_forward(
             prompt_ids,
@@ -162,8 +164,9 @@ class S4SequenceModel(nn.Module):
             stop_at_eos,
             forbidden_token_ids,
             min_new_tokens,
+            sampling_temperature,
         )
-    
+
     @torch.no_grad()
     def _generate_recurrent(
         self,
@@ -173,23 +176,24 @@ class S4SequenceModel(nn.Module):
         stop_at_eos: bool,
         forbidden_token_ids: Optional[tuple[int, ...]],
         min_new_tokens: int,
+        sampling_temperature: Optional[float],
     ) -> torch.Tensor:
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
-        
+
         # recurrent generation caches one s4 state per layer
         states = [block.default_state(batch, device) for block in self.blocks]
-        
+
         for t in range(prompt_len):
             token = prompt_ids[:, t]
             x = self.embed(token)
-            
+
             for i, block in enumerate(self.blocks):
                 x, states[i] = block.step(x, states[i])
-        
+
         generated = prompt_ids.tolist()
         finished = torch.zeros(batch, dtype=torch.bool, device=device)
-          
+
         for generated_count in range(max_new_tokens):
             x_final = self.ln_f(x)
             logits = self.lm_head(x_final)
@@ -207,13 +211,13 @@ class S4SequenceModel(nn.Module):
                 logits[:, eos_token_id] = -1e10
 
             _validate_generation_logits(logits)
-            next_tok = logits.argmax(dim=-1)
+            next_tok = _select_next_token(logits, sampling_temperature)
 
             if stop_at_eos and eos_token_id is not None:
                 eos = torch.full_like(next_tok, eos_token_id)
                 next_tok = torch.where(finished, eos, next_tok)
                 finished = finished | (next_tok == eos_token_id)
-            
+
             for i in range(batch):
                 generated[i].append(next_tok[i].item())
 
@@ -223,10 +227,10 @@ class S4SequenceModel(nn.Module):
             x = self.embed(next_tok)
             for i, block in enumerate(self.blocks):
                 x, states[i] = block.step(x, states[i])
-        
+
         output = torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
         return output
-    
+
     @torch.no_grad()
     def _generate_forward(
         self,
@@ -236,6 +240,7 @@ class S4SequenceModel(nn.Module):
         stop_at_eos: bool,
         forbidden_token_ids: Optional[tuple[int, ...]],
         min_new_tokens: int,
+        sampling_temperature: Optional[float],
     ) -> torch.Tensor:
         batch, prompt_len = prompt_ids.shape
         device = prompt_ids.device
@@ -259,13 +264,13 @@ class S4SequenceModel(nn.Module):
                 logits[:, eos_token_id] = -1e10
 
             _validate_generation_logits(logits)
-            next_tok = logits.argmax(dim=-1)
+            next_tok = _select_next_token(logits, sampling_temperature)
 
             if stop_at_eos and eos_token_id is not None:
                 eos = torch.full_like(next_tok, eos_token_id)
                 next_tok = torch.where(finished, eos, next_tok)
                 finished = finished | (next_tok == eos_token_id)
-            
+
             for i in range(batch):
                 generated[i].append(next_tok[i].item())
 
@@ -295,6 +300,16 @@ def _validate_generation_logits(logits: torch.Tensor) -> None:
     valid = torch.isfinite(logits).any(dim=-1) & (logits > -1e9).any(dim=-1)
     if not valid.all().item():
         raise RuntimeError("generation has no valid next token")
+
+
+def _select_next_token(
+    logits: torch.Tensor,
+    sampling_temperature: Optional[float],
+) -> torch.Tensor:
+    if sampling_temperature is None:
+        return logits.argmax(dim=-1)
+    probabilities = torch.softmax(logits / sampling_temperature, dim=-1)
+    return torch.multinomial(probabilities, num_samples=1).squeeze(-1)
 
 
 def adapt_state_dict_vocab(state_dict: dict, vocab_size: int) -> dict:

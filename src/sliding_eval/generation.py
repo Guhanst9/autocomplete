@@ -33,7 +33,13 @@ def generate_windows(
     generate_length: int,
     batch_size: int,
     seed: int,
+    decoding_mode: str = "raw_greedy",
+    temperature: float = 1.0,
 ) -> None:
+    if decoding_mode not in {"raw_greedy", "sampled"}:
+        raise ValueError("decoding_mode must be 'raw_greedy' or 'sampled'")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
     model, tokenizer, device = load_model(checkpoint)
     torch.manual_seed(seed)
     for start in tqdm(range(0, len(windows), batch_size), desc="Generate"):
@@ -54,13 +60,14 @@ def generate_windows(
             stop_at_eos=False,
             forbidden_token_ids=tuple(forbidden),
             min_new_tokens=generate_length,
+            sampling_temperature=temperature if decoding_mode == "sampled" else None,
         )
         for window, token_ids in zip(batch, output.tolist()):
             decoded = tokenizer.decode(token_ids, stop_at_eos=False)
             window.generated_suffix = decoded[len(window.prompt) : len(window.prompt) + generate_length]
             window.generated_length = len(window.generated_suffix)
             window.accuracy_percent = exact_identity_percent(window.generated_suffix, window.true_suffix)
-            window.decoding_mode = "raw_greedy"
+            window.decoding_mode = decoding_mode
             window.longest_generated_run = longest_homopolymer_run(window.generated_suffix)
             window.n_count = window.generated_suffix.count("N")
             window.gc_difference_percent = gc_difference_percent(

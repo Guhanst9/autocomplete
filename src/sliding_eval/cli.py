@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=13)
+    parser.add_argument(
+        "--decoding_mode",
+        choices=("raw_greedy", "sampled"),
+        default="raw_greedy",
+    )
+    parser.add_argument("--temperature", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -119,6 +125,8 @@ def main() -> None:
                 generate_length=args.generate_length,
                 batch_size=args.batch_size,
                 seed=args.seed,
+                decoding_mode=args.decoding_mode,
+                temperature=args.temperature,
             )
         output_path = write_windows_csv(record, windows, args.output_dir)
         print()
@@ -132,5 +140,8 @@ def main() -> None:
             print(f"  Window starts: {','.join(str(start) for start in window_starts)}")
         if args.checkpoint:
             print(f"  Checkpoint: {args.checkpoint}")
-            print("  Decoding mode: raw_greedy")
+            print(f"  Decoding mode: {args.decoding_mode}")
+            if args.decoding_mode == "sampled":
+                print(f"  Temperature: {args.temperature}")
+                print(f"  Seed: {args.seed}")
         print(f"  CSV: {output_path}")

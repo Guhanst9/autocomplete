@@ -674,6 +674,8 @@ def run_training(
     print(f"  Model: d_model={preset.d_model}, d_state={preset.d_state}, n_layers={preset.n_layers}")
     print(f"  Model variant: s4d_v2")
     print(f"  Parameters: {parameter_count(model):,}")
+    print(f"  Epochs this run: {preset.epochs}")
+    print(f"  Epoch range: {start_epoch}-{start_epoch + preset.epochs - 1}")
     print(f"  Recovery enabled: {'yes' if preset.recovery_enabled else 'no'}")
     print(f"  Homopolymer loss weight: {preset.homopolymer_loss_weight}")
     print(f"  Homopolymer minimum run: {preset.homopolymer_min_run}")
