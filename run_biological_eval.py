@@ -2,6 +2,7 @@ import argparse
 
 from src.biological_eval.annotations import run_annotations
 from src.biological_eval.config import load_config
+from src.biological_eval.features import run_features
 from src.biological_eval.baseline import run_baseline_check
 from src.biological_eval.prepare import run_prepare
 from src.biological_eval.sliding import run_sliding
@@ -17,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument(
         "--stage",
-        choices=("prepare", "baseline-check", "annotations", "sliding", "summarize"),
+        choices=("prepare", "baseline-check", "annotations", "sliding", "summarize", "features"),
         required=True,
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
@@ -54,6 +55,8 @@ def main() -> None:
         )
     elif args.stage == "summarize":
         run_summarize(args.output_dir, args.reports_dir)
+    elif args.stage == "features":
+        run_features(args.output_dir, args.reports_dir)
 
 
 if __name__ == "__main__":

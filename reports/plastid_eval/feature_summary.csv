@@ -1,0 +1,2 @@
+accession,feature_label,feature_type,rows,avg_accuracy_percent,avg_aa_identity_percent,internal_stop_codons,total_overlap_bases
+NC_053550.1,psbA,CDS,2,96.00,90.00,15,1024
