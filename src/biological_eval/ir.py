@@ -4,6 +4,7 @@ from statistics import mean
 from typing import Any
 
 import torch
+from tqdm import tqdm
 
 from src.biological_eval.config import require_keys
 from src.biological_eval.context_topk import exact_identity, parse_int_list, write_csv
@@ -63,61 +64,69 @@ def run_ir(
     records = load_panel_records(config["raw_fasta"], panel)
     model, tokenizer, device = load_model(config["checkpoint"])
     rows: list[dict[str, Any]] = []
+    tasks = []
 
     for item in panel:
         record = records.get(item["accession"])
         if record is None:
             continue
         ira, irb, boundary_source = inferred_ir_regions(record.sequence)
-        for offset in paired_offsets(ira, irb, int(config["generation_length"]), max_pairs):
-            ira_target_start = ira.start + offset
-            irb_target_start = irb.start + offset
-            ira_true = slice_sequence(record.sequence, ira_target_start, int(config["generation_length"]), True)
-            irb_true = slice_sequence(record.sequence, irb_target_start, int(config["generation_length"]), True)
-            ira_prompt = slice_sequence(
-                record.sequence,
-                ira_target_start - int(config["prompt_length"]),
-                int(config["prompt_length"]),
-                True,
+        target_length = int(config["generation_length"])
+        prompt_length = int(config["prompt_length"])
+        for offset in paired_offsets(ira, irb, target_length, max_pairs):
+            tasks.append((record, ira, irb, boundary_source, offset, target_length, prompt_length))
+
+    for record, ira, irb, boundary_source, offset, target_length, prompt_length in tqdm(
+        tasks, desc="IR pairs", unit="pair"
+    ):
+        ira_target_start = ira.start + offset
+        irb_target_start = irb.start + (irb.length - offset - target_length)
+        ira_true = slice_sequence(record.sequence, ira_target_start, target_length, True)
+        irb_true = slice_sequence(record.sequence, irb_target_start, target_length, True)
+        ira_prompt = slice_sequence(
+            record.sequence,
+            ira_target_start - prompt_length,
+            prompt_length,
+            True,
+        )
+        irb_prompt = slice_sequence(
+            record.sequence,
+            irb_target_start - prompt_length,
+            prompt_length,
+            True,
+        )
+        true_ir_identity = exact_identity(ira_true, reverse_complement(irb_true))
+        for seed in seeds:
+            ira_generated = generate_suffix(
+                model,
+                tokenizer,
+                device,
+                ira_prompt,
+                target_length,
+                seed,
+                temperature,
             )
-            irb_prompt = slice_sequence(
-                record.sequence,
-                irb_target_start - int(config["prompt_length"]),
-                int(config["prompt_length"]),
-                True,
+            irb_generated = generate_suffix(
+                model,
+                tokenizer,
+                device,
+                irb_prompt,
+                target_length,
+                seed,
+                temperature,
             )
-            true_ir_identity = exact_identity(ira_true, reverse_complement(irb_true))
-            for seed in seeds:
-                ira_generated = generate_suffix(
-                    model,
-                    tokenizer,
-                    device,
-                    ira_prompt,
-                    int(config["generation_length"]),
-                    seed,
-                    temperature,
-                )
-                irb_generated = generate_suffix(
-                    model,
-                    tokenizer,
-                    device,
-                    irb_prompt,
-                    int(config["generation_length"]),
-                    seed,
-                    temperature,
-                )
-                rows.append(
-                    {
-                        "accession": record.accession,
-                        "boundary_source": boundary_source,
-                        "offset": offset,
-                        "seed": seed,
-                        "true_ir_identity_percent": f"{true_ir_identity:.2f}",
-                        "generated_ir_identity_percent": f"{exact_identity(ira_generated, reverse_complement(irb_generated)):.2f}",
-                        "ira_identity_to_true_percent": f"{exact_identity(ira_generated, ira_true):.2f}",
-                        "irb_identity_to_true_percent": f"{exact_identity(irb_generated, irb_true):.2f}",
-                    }
-                )
+            rows.append(
+                {
+                    "accession": record.accession,
+                    "boundary_source": boundary_source,
+                    "offset": offset,
+                    "seed": seed,
+                    "true_ir_identity_percent": f"{true_ir_identity:.2f}",
+                    "generated_ir_identity_percent": f"{exact_identity(ira_generated, reverse_complement(irb_generated)):.2f}",
+                    "ira_identity_to_true_percent": f"{exact_identity(ira_generated, ira_true):.2f}",
+                    "irb_identity_to_true_percent": f"{exact_identity(irb_generated, irb_true):.2f}",
+                }
+            )
 
     detail_path = Path(output_dir) / "ir_eval.csv"
     write_csv(detail_path, rows)

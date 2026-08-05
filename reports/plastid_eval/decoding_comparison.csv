@@ -1,2 +1,2 @@
 decoding_mode,seed,rows,avg_accuracy_percent,min_accuracy_percent,max_accuracy_percent,avg_gc_difference_percent,max_longest_generated_run,runs_over_20,n_count
-sampled,13,2,96.00,95.90,96.09,0.88,5,0,0
+sampled,13,4101,50.69,19.53,100.00,10.09,17,0,0

@@ -1,2 +1,8 @@
 accession,group,exposure,decoding_mode,seed,rows,avg_accuracy_percent,min_accuracy_percent,max_accuracy_percent,avg_gc_difference_percent,max_longest_generated_run,runs_over_20,n_count
-NC_053550.1,Rosa,decoding-development,sampled,13,2,96.00,95.90,96.09,0.88,5,0,0
+NC_023110.1,Sunflower,validation,sampled,13,590,51.68,23.63,99.80,10.03,17,0,0
+NC_027476.1,Grass,validation,sampled,13,534,46.29,21.68,98.83,11.67,15,0,0
+NC_030275.1,Sunflower,training,sampled,13,590,51.87,24.80,100.00,9.88,16,0,0
+NC_030377.1,Grass,training,sampled,13,549,45.09,19.53,98.63,11.77,14,0,0
+NC_038102.1,Rosa,training,sampled,13,611,56.94,22.46,99.80,8.06,17,0,0
+NC_053550.1,Rosa,decoding-development,sampled,13,616,56.87,24.02,99.80,8.37,13,0,0
+NC_061264.1,Rosa,validation,sampled,13,611,44.98,23.83,99.80,11.26,14,0,0
