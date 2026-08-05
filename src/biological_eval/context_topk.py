@@ -1,9 +1,11 @@
 import csv
 from collections import Counter
 from pathlib import Path
+from statistics import mean
 from typing import Any
 
 import torch
+from tqdm import tqdm
 
 from src.biological_eval.config import require_keys
 from src.biological_eval.sliding import load_panel_records, selected_panel
@@ -68,10 +70,62 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def summarize_context(rows: list[dict[str, Any]], reports_dir: str) -> None:
+    groups: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (row["accession"], int(row["context_length"]))
+        groups.setdefault(key, []).append(row)
+
+    summary = []
+    for (accession, context_length), group_rows in sorted(groups.items()):
+        accuracies = [float(row["accuracy_percent"]) for row in group_rows]
+        gc_diffs = [float(row["gc_difference_percent"]) for row in group_rows]
+        longest_runs = [int(row["longest_run"]) for row in group_rows]
+        diversities = [float(row["kmer_diversity"]) for row in group_rows]
+        summary.append(
+            {
+                "accession": accession,
+                "context_length": context_length,
+                "rows": len(group_rows),
+                "avg_accuracy_percent": f"{mean(accuracies):.2f}",
+                "min_accuracy_percent": f"{min(accuracies):.2f}",
+                "max_accuracy_percent": f"{max(accuracies):.2f}",
+                "avg_gc_difference_percent": f"{mean(gc_diffs):.2f}",
+                "max_longest_run": max(longest_runs),
+                "avg_kmer_diversity": f"{mean(diversities):.4f}",
+            }
+        )
+
+    overall: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        overall.setdefault(int(row["context_length"]), []).append(row)
+    for context_length, group_rows in sorted(overall.items()):
+        accuracies = [float(row["accuracy_percent"]) for row in group_rows]
+        gc_diffs = [float(row["gc_difference_percent"]) for row in group_rows]
+        longest_runs = [int(row["longest_run"]) for row in group_rows]
+        diversities = [float(row["kmer_diversity"]) for row in group_rows]
+        summary.append(
+            {
+                "accession": "all",
+                "context_length": context_length,
+                "rows": len(group_rows),
+                "avg_accuracy_percent": f"{mean(accuracies):.2f}",
+                "min_accuracy_percent": f"{min(accuracies):.2f}",
+                "max_accuracy_percent": f"{max(accuracies):.2f}",
+                "avg_gc_difference_percent": f"{mean(gc_diffs):.2f}",
+                "max_longest_run": max(longest_runs),
+                "avg_kmer_diversity": f"{mean(diversities):.4f}",
+            }
+        )
+
+    write_csv(Path(reports_dir) / "context_length_summary.csv", summary)
+
+
 @torch.no_grad()
 def run_context(
     config: dict[str, Any],
     output_dir: str,
+    reports_dir: str,
     max_genomes: int | None,
     max_targets: int | None,
     seeds_value: str | None,
@@ -86,6 +140,7 @@ def run_context(
     forbidden = (tokenizer.pad_token_id, tokenizer.unk_token_id, tokenizer.eos_token_id)
     rows: list[dict[str, Any]] = []
 
+    tasks = []
     for item in panel:
         record = records.get(item["accession"])
         if record is None:
@@ -101,41 +156,46 @@ def run_context(
             for context_length in context_lengths:
                 prompt_start = target_start - context_length
                 prompt = slice_sequence(record.sequence, prompt_start, context_length, circular=True)
-                prompt_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
                 for seed in seeds:
-                    torch.manual_seed(seed)
-                    output = model.generate(
-                        prompt_ids,
-                        max_new_tokens=int(config["generation_length"]),
-                        eos_token_id=tokenizer.eos_token_id,
-                        stop_at_eos=False,
-                        forbidden_token_ids=forbidden,
-                        min_new_tokens=int(config["generation_length"]),
-                        sampling_temperature=float(config["primary_decoding"]["temperature"]),
-                    )
-                    generated = tokenizer.decode(output[0, len(prompt) :].tolist(), stop_at_eos=False)
-                    rows.append(
-                        {
-                            "accession": record.accession,
-                            "target_start": target_start,
-                            "context_length": context_length,
-                            "seed": seed,
-                            "accuracy_percent": f"{exact_identity(generated, truth):.2f}",
-                            "gc_difference_percent": f"{100.0 * abs(gc_fraction(generated) - gc_fraction(truth)):.2f}",
-                            "longest_run": longest_run(generated),
-                            "kmer_diversity": f"{kmer_diversity(generated):.4f}",
-                            "prompt_length": len(prompt),
-                            "generated_length": len(generated),
-                            "true_suffix": truth,
-                            "generated_suffix": generated,
-                        }
-                    )
+                    tasks.append((record, target_start, context_length, prompt, truth, seed))
+
+    for record, target_start, context_length, prompt, truth, seed in tqdm(tasks, desc="Context generations"):
+        prompt_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
+        torch.manual_seed(seed)
+        output = model.generate(
+            prompt_ids,
+            max_new_tokens=int(config["generation_length"]),
+            eos_token_id=tokenizer.eos_token_id,
+            stop_at_eos=False,
+            forbidden_token_ids=forbidden,
+            min_new_tokens=int(config["generation_length"]),
+            sampling_temperature=float(config["primary_decoding"]["temperature"]),
+        )
+        generated = tokenizer.decode(output[0, len(prompt) :].tolist(), stop_at_eos=False)
+        rows.append(
+            {
+                "accession": record.accession,
+                "target_start": target_start,
+                "context_length": context_length,
+                "seed": seed,
+                "accuracy_percent": f"{exact_identity(generated, truth):.2f}",
+                "gc_difference_percent": f"{100.0 * abs(gc_fraction(generated) - gc_fraction(truth)):.2f}",
+                "longest_run": longest_run(generated),
+                "kmer_diversity": f"{kmer_diversity(generated):.4f}",
+                "prompt_length": len(prompt),
+                "generated_length": len(generated),
+                "true_suffix": truth,
+                "generated_suffix": generated,
+            }
+        )
 
     output_path = Path(output_dir) / "context_eval.csv"
     write_csv(output_path, rows)
+    summarize_context(rows, reports_dir)
     print("Context stage complete")
     print(f"  Rows: {len(rows)}")
     print(f"  Output: {output_path}")
+    print(f"  Summary: {Path(reports_dir) / 'context_length_summary.csv'}")
 
 
 def base_frequency_baseline(sequence: str) -> str:

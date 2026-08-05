@@ -50,6 +50,18 @@ The checkpoint is the 16.57M-parameter S4D-v2 model trained with 1,024-base cont
 
 ## Context-length and top-k results
 
+Free-generation context-length comparison:
+
+| accession | context_length | rows | avg_accuracy_percent | min_accuracy_percent | max_accuracy_percent | avg_gc_difference_percent | max_longest_run | avg_kmer_diversity |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| NC_023110.1 | 128 | 5 | 72.50 | 33.40 | 97.07 | 4.37 | 9 | 0.9830 |
+| NC_023110.1 | 256 | 5 | 78.24 | 32.23 | 97.07 | 2.38 | 6 | 0.9802 |
+| NC_023110.1 | 512 | 5 | 78.67 | 33.79 | 97.27 | 1.17 | 9 | 0.9826 |
+| NC_023110.1 | 1024 | 5 | 79.42 | 35.16 | 97.07 | 4.38 | 8 | 0.9533 |
+| NC_027476.1 | 128 | 5 | 52.66 | 28.52 | 94.34 | 7.34 | 8 | 0.9715 |
+
+Teacher-forced top-k comparison:
+
 | accession | target_start | bases | top1_accuracy_percent | top2_accuracy_percent | mean_true_base_probability | base_frequency_baseline_percent | baseline_base |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | NC_053550.1 | 512 | 512 | 96.68 | 99.80 | 0.9517 | 25.20 | T |
@@ -58,7 +70,7 @@ The checkpoint is the 16.57M-parameter S4D-v2 model trained with 1,024-base cont
 | NC_053550.1 | 1280 | 512 | 84.77 | 94.34 | 0.7982 | 29.88 | T |
 | NC_053550.1 | 1536 | 512 | 79.30 | 91.80 | 0.7134 | 32.42 | T |
 
-Context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
+Full context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
 
 ## Synthetic controls
 
@@ -66,4 +78,4 @@ Synthetic evaluation remains a separate check through `run_synthetic_eval.py`. I
 
 ## Limitations and next experiments
 
-The current report is based on local panel smoke outputs unless the full stages are rerun. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
+The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.

@@ -77,6 +77,7 @@ def main() -> None:
         run_context(
             config,
             args.output_dir,
+            args.reports_dir,
             max_genomes=args.max_genomes,
             max_targets=args.max_windows,
             seeds_value=args.seeds,

@@ -135,6 +135,16 @@ def run_figures(reports_dir: str) -> None:
             "identity (%)",
         )
 
+    context = [row for row in read_csv(reports / "context_length_summary.csv") if row.get("accession") == "all"]
+    if context:
+        save_bar(
+            figure_dir / "context_length_accuracy.png",
+            [row["context_length"] for row in context],
+            [float(row["avg_accuracy_percent"]) for row in context],
+            "recursive accuracy by context length",
+            "accuracy (%)",
+        )
+
     print("Figure stage complete")
     print(f"  Training history: {history_path}")
     print(f"  Figures: {figure_dir}")
@@ -187,9 +197,15 @@ The checkpoint is the 16.57M-parameter S4D-v2 model trained with 1,024-base cont
 
 ## Context-length and top-k results
 
+Free-generation context-length comparison:
+
+{table_preview(reports / "context_length_summary.csv")}
+
+Teacher-forced top-k comparison:
+
 {table_preview(reports / "topk_summary.csv")}
 
-Context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
+Full context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
 
 ## Synthetic controls
 
@@ -197,7 +213,7 @@ Synthetic evaluation remains a separate check through `run_synthetic_eval.py`. I
 
 ## Limitations and next experiments
 
-The current report is based on local panel smoke outputs unless the full stages are rerun. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
+The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
 """
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(content)
