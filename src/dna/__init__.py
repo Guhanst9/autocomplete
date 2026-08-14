@@ -7,13 +7,21 @@ from .data import (
     split_records,
     stream_fasta,
 )
-from .training import PRESETS, TrainingPreset, build_optimizer, parameter_count, run_training
+from .training import (
+    PRESETS,
+    TRANSFORMER_PRESETS,
+    TrainingPreset,
+    build_optimizer,
+    parameter_count,
+    run_training,
+)
 
 __all__ = [
     "DnaTokenizer",
     "DnaWindowDataset",
     "PRESETS",
     "TrainingPreset",
+    "TRANSFORMER_PRESETS",
     "accession_from_header",
     "build_optimizer",
     "load_dna_records",

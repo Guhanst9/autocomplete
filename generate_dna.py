@@ -40,7 +40,7 @@ def read_prompt_file(path: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a DNA continuation from a trained S4D checkpoint."
+        description="Generate a DNA continuation from a trained DNA checkpoint."
     )
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     prompt_group = parser.add_mutually_exclusive_group(required=True)
@@ -100,6 +100,7 @@ def main() -> None:
     print("DNA generation")
     print(f"  Checkpoint: {args.checkpoint}")
     print(f"  Device: {device}")
+    print(f"  Model type: {getattr(model, 'model_type', 's4d')}")
     print(f"  Prompt length: {len(prompt)}")
     print(f"  Generated length: {len(generated)}")
     print(f"  Decoding mode: {args.decoding_mode}")

@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import random
@@ -12,6 +13,7 @@ from tqdm import tqdm
 from src.dna.checkpoint import get_device, tokenizer_from_checkpoint
 from src.dna.data import DnaTokenizer, DnaWindowDataset, load_dna_records, split_records
 from src.models.s4_model import S4SequenceModel
+from src.models.transformer_model import TransformerSequenceModel
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class TrainingPreset:
     free_eval_windows: int = 32
     free_eval_prompt_length: int = 512
     free_eval_generate_length: int = 128
+    n_heads: Optional[int] = None
+    ffn_dim: Optional[int] = None
 
 
 PRESETS = {
@@ -99,11 +103,109 @@ PRESETS = {
 }
 
 
+TRANSFORMER_PRESETS = {
+    "smoke": TrainingPreset(
+        name="smoke",
+        d_model=64,
+        d_state=0,
+        n_layers=1,
+        l_max=128,
+        max_records=100,
+        max_windows=100,
+        windows_per_record=1,
+        epochs=1,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        free_eval_windows=4,
+        free_eval_prompt_length=64,
+        free_eval_generate_length=16,
+        n_heads=4,
+        ffn_dim=256,
+    ),
+    "quick": TrainingPreset(
+        name="quick",
+        d_model=256,
+        d_state=0,
+        n_layers=5,
+        l_max=1024,
+        max_records=7500,
+        max_windows=None,
+        windows_per_record=1,
+        epochs=2,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        n_heads=4,
+        ffn_dim=1024,
+    ),
+    "full": TrainingPreset(
+        name="full",
+        d_model=384,
+        d_state=0,
+        n_layers=9,
+        l_max=1024,
+        max_records=None,
+        max_windows=30000,
+        windows_per_record=2,
+        epochs=6,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        n_heads=6,
+        ffn_dim=1600,
+    ),
+}
+
+
 def parameter_count(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters())
 
 
-def build_sequence_model(tokenizer: DnaTokenizer, preset: TrainingPreset) -> S4SequenceModel:
+def record_fingerprint(records: list[tuple[str, str]]) -> str:
+    digest = hashlib.sha256()
+    for header, _ in records:
+        digest.update(header.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def window_fingerprint(dataset: DnaWindowDataset) -> str:
+    digest = hashlib.sha256()
+    for window in dataset.windows:
+        digest.update(bytes(window.tokens))
+        digest.update(bytes((int(window.ends_sequence),)))
+    return digest.hexdigest()
+
+
+def build_sequence_model(
+    tokenizer: DnaTokenizer,
+    preset: TrainingPreset,
+    model_type: str = "s4d",
+) -> torch.nn.Module:
+    if model_type == "transformer":
+        if preset.n_heads is None or preset.ffn_dim is None:
+            raise ValueError("transformer presets require n_heads and ffn_dim")
+        return TransformerSequenceModel(
+            vocab_size=tokenizer.vocab_size,
+            d_model=preset.d_model,
+            n_heads=preset.n_heads,
+            n_layers=preset.n_layers,
+            ffn_dim=preset.ffn_dim,
+            dropout=preset.dropout,
+            pad_token_id=tokenizer.pad_token_id,
+            mask_token_id=tokenizer.unk_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            max_length=preset.l_max,
+        )
+    if model_type != "s4d":
+        raise ValueError("model_type must be 's4d' or 'transformer'")
     return S4SequenceModel(
         vocab_size=tokenizer.vocab_size,
         d_model=preset.d_model,
@@ -122,11 +224,30 @@ def build_sequence_model(tokenizer: DnaTokenizer, preset: TrainingPreset) -> S4S
 
 
 def build_optimizer(
-    model: S4SequenceModel,
+    model: torch.nn.Module,
     lr: float,
     weight_decay: float,
     ssm_lr: Optional[float] = None,
 ) -> torch.optim.AdamW:
+    if isinstance(model, TransformerSequenceModel):
+        decay_parameters = []
+        no_decay_parameters = []
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if parameter.ndim < 2 or name.endswith("bias"):
+                no_decay_parameters.append(parameter)
+            else:
+                decay_parameters.append(parameter)
+        return torch.optim.AdamW(
+            [
+                {"params": decay_parameters, "lr": lr, "weight_decay": weight_decay},
+                {"params": no_decay_parameters, "lr": lr, "weight_decay": 0.0},
+            ]
+        )
+
+    if not isinstance(model, S4SequenceModel):
+        raise TypeError(f"unsupported model type: {type(model).__name__}")
     if model.model_variant == "legacy":
         return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -551,14 +672,25 @@ def free_generation_metrics(
 
 def assert_resume_matches_preset(checkpoint: dict, preset: TrainingPreset) -> None:
     config = checkpoint.get("model_config", {})
-    expected = {
-        "d_model": preset.d_model,
-        "d_state": preset.d_state,
-        "n_layers": preset.n_layers,
-        "kernel_type": "diag",
-        "model_variant": "s4d_v2",
-        "l_max": preset.l_max,
-    }
+    model_type = checkpoint.get("model_type", config.get("model_type", "s4d"))
+    expected = {"d_model": preset.d_model, "n_layers": preset.n_layers}
+    if model_type == "transformer":
+        expected.update(
+            {
+                "n_heads": preset.n_heads,
+                "ffn_dim": preset.ffn_dim,
+                "max_length": preset.l_max,
+            }
+        )
+    else:
+        expected.update(
+            {
+                "d_state": preset.d_state,
+                "kernel_type": "diag",
+                "model_variant": "s4d_v2",
+                "l_max": preset.l_max,
+            }
+        )
     mismatches = {
         key: (config.get(key), value)
         for key, value in expected.items()
@@ -618,21 +750,83 @@ def build_datasets(
     return train_records, val_records, train_dataset, val_dataset
 
 
+def _model_config(
+    model: torch.nn.Module,
+    preset: TrainingPreset,
+    tokenizer: DnaTokenizer,
+    model_type: str,
+) -> dict:
+    shared = {
+        "model_type": model_type,
+        "vocab_size": tokenizer.vocab_size,
+        "d_model": model.d_model,
+        "n_layers": model.n_layers,
+        "dropout": preset.dropout,
+        "eos_token_id": tokenizer.eos_token_id,
+        "homopolymer_loss_weight": preset.homopolymer_loss_weight,
+        "homopolymer_min_run": preset.homopolymer_min_run,
+        "recovery_enabled": preset.recovery_enabled,
+        "recovery_loss_weight": preset.recovery_loss_weight,
+        "recovery_start_probability": preset.recovery_start_probability,
+        "recovery_max_probability": preset.recovery_max_probability,
+        "recovery_warmup_epochs": preset.recovery_warmup_epochs,
+    }
+    if model_type == "transformer":
+        shared.update(
+            {
+                "n_heads": model.n_heads,
+                "ffn_dim": model.ffn_dim,
+                "max_length": model.max_length,
+                "position_encoding": "rope",
+            }
+        )
+    else:
+        shared.update(
+            {
+                "d_state": model.d_state,
+                "kernel_type": model.kernel_type,
+                "model_variant": model.model_variant,
+                "l_max": preset.l_max,
+            }
+        )
+    return shared
+
+
 def run_training(
     preset_name: str,
     fasta_file: str,
     output_dir: str,
     resume: Optional[str],
     holdout_accession: str,
+    model_type: str = "s4d",
 ) -> None:
-    preset = PRESETS[preset_name]
+    preset_options = TRANSFORMER_PRESETS if model_type == "transformer" else PRESETS
+    if model_type not in {"s4d", "transformer"}:
+        raise ValueError("model_type must be 's4d' or 'transformer'")
+    preset = preset_options[preset_name]
     random.seed(preset.seed)
     torch.manual_seed(preset.seed)
     device = get_device()
+    if (
+        model_type == "transformer"
+        and device.type == "mps"
+        and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1"
+    ):
+        raise RuntimeError(
+            "disable PYTORCH_ENABLE_MPS_FALLBACK so Transformer training cannot move to CPU silently"
+        )
     tokenizer = DnaTokenizer(include_n=False)
     resume_checkpoint = None
     if resume:
         resume_checkpoint = torch.load(resume, map_location=device)
+        checkpoint_type = resume_checkpoint.get(
+            "model_type",
+            resume_checkpoint.get("model_config", {}).get("model_type", "s4d"),
+        )
+        if checkpoint_type != model_type:
+            raise ValueError(
+                f"cannot resume {model_type} training from a {checkpoint_type} checkpoint"
+            )
         assert_resume_matches_preset(resume_checkpoint, preset)
         tokenizer = tokenizer_from_checkpoint(resume_checkpoint)
         if "N" in tokenizer.vocab:
@@ -645,10 +839,16 @@ def run_training(
         preset=preset,
         holdout_accession=holdout_accession,
     )
+    data_fingerprints = {
+        "train_records": record_fingerprint(train_records),
+        "val_records": record_fingerprint(val_records),
+        "train_windows": window_fingerprint(train_dataset),
+        "val_windows": window_fingerprint(val_dataset),
+    }
     train_loader = DataLoader(train_dataset, batch_size=preset.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=preset.batch_size, shuffle=False, num_workers=0)
 
-    model = build_sequence_model(tokenizer, preset).to(device)
+    model = build_sequence_model(tokenizer, preset, model_type=model_type).to(device)
     optimizer = build_optimizer(model, preset.lr, preset.weight_decay)
     start_epoch = 0
     best_val = float("inf")
@@ -663,7 +863,7 @@ def run_training(
         best_val = ckpt.get("best_val_loss", best_val)
         best_quality = ckpt.get("best_quality_score", ckpt.get("quality_score", best_quality))
 
-    print("DNA S4D run")
+    print(f"DNA {model_type.upper()} run")
     print(f"  Device: {device}")
     print(f"  Preset: {preset.name}")
     print(f"  FASTA: {fasta_file}")
@@ -671,8 +871,18 @@ def run_training(
     print(f"  Train/val records: {len(train_records)}/{len(val_records)}")
     print(f"  Train/val windows: {len(train_dataset)}/{len(val_dataset)}")
     print(f"  Vocab size: {tokenizer.vocab_size}")
-    print(f"  Model: d_model={preset.d_model}, d_state={preset.d_state}, n_layers={preset.n_layers}")
-    print(f"  Model variant: s4d_v2")
+    if model_type == "transformer":
+        print(
+            f"  Model: d_model={preset.d_model}, n_heads={preset.n_heads}, "
+            f"ffn_dim={preset.ffn_dim}, n_layers={preset.n_layers}"
+        )
+        print("  Model variant: causal_transformer")
+    else:
+        print(
+            f"  Model: d_model={preset.d_model}, d_state={preset.d_state}, "
+            f"n_layers={preset.n_layers}"
+        )
+        print("  Model variant: s4d_v2")
     print(f"  Parameters: {parameter_count(model):,}")
     print(f"  Epochs this run: {preset.epochs}")
     print(f"  Epoch range: {start_epoch}-{start_epoch + preset.epochs - 1}")
@@ -714,9 +924,11 @@ def run_training(
             "epoch": epoch,
             "objective": "autocomplete",
             "data_type": "plastid_dna",
+            "model_type": model_type,
             "preset": preset.name,
             "preset_config": asdict(preset),
             "holdout_accession": holdout_accession,
+            "data_fingerprints": data_fingerprints,
             "best_val_loss": best_val,
             "best_quality_score": max(best_quality, free_metrics["quality_score"]),
             "free_generation_metrics": free_metrics,
@@ -729,24 +941,7 @@ def run_training(
                 "current_probability": train_epoch_metrics["recovery_probability"],
             },
             "tokenizer_vocab": tokenizer.vocab,
-            "model_config": {
-                "vocab_size": tokenizer.vocab_size,
-                "d_model": model.d_model,
-                "d_state": model.d_state,
-                "n_layers": model.n_layers,
-                "kernel_type": model.kernel_type,
-                "model_variant": model.model_variant,
-                "eos_token_id": tokenizer.eos_token_id,
-                "l_max": preset.l_max,
-                "dropout": preset.dropout,
-                "homopolymer_loss_weight": preset.homopolymer_loss_weight,
-                "homopolymer_min_run": preset.homopolymer_min_run,
-                "recovery_enabled": preset.recovery_enabled,
-                "recovery_loss_weight": preset.recovery_loss_weight,
-                "recovery_start_probability": preset.recovery_start_probability,
-                "recovery_max_probability": preset.recovery_max_probability,
-                "recovery_warmup_epochs": preset.recovery_warmup_epochs,
-            },
+            "model_config": _model_config(model, preset, tokenizer, model_type),
         }
         torch.save(save, os.path.join(output_dir, "last.pt"))
         if is_best or not os.path.exists(os.path.join(output_dir, "best_loss.pt")):
