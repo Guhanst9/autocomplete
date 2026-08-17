@@ -12,6 +12,8 @@ from tqdm import tqdm
 
 from src.dna.checkpoint import get_device, tokenizer_from_checkpoint
 from src.dna.data import DnaTokenizer, DnaWindowDataset, load_dna_records, split_records
+from src.dna.generation import generate_bases
+from src.dna.prediction import TripletCodec, normalize_prediction_unit
 from src.models.s4_model import S4SequenceModel
 from src.models.transformer_model import TransformerSequenceModel
 
@@ -52,6 +54,25 @@ class TrainingPreset:
 
 
 PRESETS = {
+    "smoke": TrainingPreset(
+        name="smoke",
+        d_model=64,
+        d_state=16,
+        n_layers=1,
+        l_max=128,
+        max_records=100,
+        max_windows=100,
+        windows_per_record=1,
+        epochs=1,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        free_eval_windows=4,
+        free_eval_prompt_length=64,
+        free_eval_generate_length=16,
+    ),
     "quick-control": TrainingPreset(
         name="quick-control",
         d_model=196,
@@ -188,12 +209,17 @@ def build_sequence_model(
     tokenizer: DnaTokenizer,
     preset: TrainingPreset,
     model_type: str = "s4d",
+    prediction_unit: str = "base",
 ) -> torch.nn.Module:
+    prediction_unit = normalize_prediction_unit(prediction_unit)
+    output_vocab_size = 64 if prediction_unit == "triplet" else tokenizer.vocab_size
     if model_type == "transformer":
         if preset.n_heads is None or preset.ffn_dim is None:
             raise ValueError("transformer presets require n_heads and ffn_dim")
         return TransformerSequenceModel(
             vocab_size=tokenizer.vocab_size,
+            input_vocab_size=tokenizer.vocab_size,
+            output_vocab_size=output_vocab_size,
             d_model=preset.d_model,
             n_heads=preset.n_heads,
             n_layers=preset.n_layers,
@@ -208,6 +234,8 @@ def build_sequence_model(
         raise ValueError("model_type must be 's4d' or 'transformer'")
     return S4SequenceModel(
         vocab_size=tokenizer.vocab_size,
+        input_vocab_size=tokenizer.vocab_size,
+        output_vocab_size=output_vocab_size,
         d_model=preset.d_model,
         d_state=preset.d_state,
         n_layers=preset.n_layers,
@@ -296,6 +324,9 @@ def homopolymer_end_loss(
     loss_mask: torch.Tensor,
     base_token_ids: set[int],
     min_run: int,
+    prediction_unit: str = "base",
+    triplet_codec: Optional[TripletCodec] = None,
+    tokenizer: Optional[DnaTokenizer] = None,
 ) -> tuple[torch.Tensor, int]:
     if min_run < 2:
         raise ValueError("homopolymer_min_run must be at least 2")
@@ -304,6 +335,11 @@ def homopolymer_end_loss(
     targets = target_ids.detach().cpu()
     scored = loss_mask.detach().cpu().bool()
     selected = torch.zeros_like(scored)
+    triplet_first_ids = None
+    if prediction_unit == "triplet":
+        if triplet_codec is None or tokenizer is None:
+            raise ValueError("triplet homopolymer loss requires a codec and tokenizer")
+        triplet_first_ids = triplet_codec.base_ids(tokenizer)[:, 0]
 
     for batch_idx in range(inputs.size(0)):
         previous = None
@@ -319,10 +355,13 @@ def homopolymer_end_loss(
             else:
                 previous = token
                 run_length = 1
+            target_first = int(targets[batch_idx, pos])
+            if triplet_first_ids is not None:
+                target_first = int(triplet_first_ids[target_first])
             if (
                 run_length >= min_run
                 and bool(scored[batch_idx, pos])
-                and int(targets[batch_idx, pos]) != token
+                and target_first != token
             ):
                 selected[batch_idx, pos] = True
 
@@ -331,8 +370,14 @@ def homopolymer_end_loss(
         return logits.sum() * 0.0, 0
 
     selected = selected.to(logits.device)
-    repeat_ids = input_ids[selected].unsqueeze(-1)
-    repeat_probabilities = logits[selected].softmax(dim=-1).gather(-1, repeat_ids).squeeze(-1)
+    probabilities = logits[selected].softmax(dim=-1)
+    repeat_ids = input_ids[selected]
+    if prediction_unit == "base":
+        repeat_probabilities = probabilities.gather(-1, repeat_ids.unsqueeze(-1)).squeeze(-1)
+    else:
+        first_ids = triplet_first_ids.to(logits.device)
+        class_mask = first_ids.unsqueeze(0) == repeat_ids.unsqueeze(1)
+        repeat_probabilities = (probabilities * class_mask).sum(dim=-1)
     penalty = -torch.log((1.0 - repeat_probabilities).clamp_min(1e-6)).mean()
     return penalty, position_count
 
@@ -355,6 +400,8 @@ def build_recovery_batch(
     logits: torch.Tensor,
     tokenizer: DnaTokenizer,
     corruption_probability: float,
+    prediction_unit: str = "base",
+    triplet_codec: Optional[TripletCodec] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     if corruption_probability <= 0:
         empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
@@ -377,11 +424,18 @@ def build_recovery_batch(
         empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
         return input_ids, empty_mask, 0, int(eligible.sum().item())
 
-    base_logits = logits.detach().clone()
-    allowed = torch.zeros(base_logits.size(-1), dtype=torch.bool, device=base_logits.device)
-    allowed[base_token_ids.long()] = True
-    base_logits[..., ~allowed] = -1e10
-    predicted_at_position = base_logits.argmax(dim=-1)
+    if prediction_unit == "base":
+        base_logits = logits.detach().clone()
+        allowed = torch.zeros(base_logits.size(-1), dtype=torch.bool, device=base_logits.device)
+        allowed[base_token_ids.long()] = True
+        base_logits[..., ~allowed] = -1e10
+        predicted_at_position = base_logits.argmax(dim=-1)
+    else:
+        if triplet_codec is None:
+            raise ValueError("triplet recovery requires a triplet codec")
+        predicted_classes = logits.detach().argmax(dim=-1)
+        first_base_ids = triplet_codec.base_ids(tokenizer, input_ids.device)[:, 0]
+        predicted_at_position = first_base_ids[predicted_classes]
 
     shifted_prediction = input_ids.clone()
     shifted_prediction[:, 1:] = predicted_at_position[:, :-1]
@@ -423,6 +477,8 @@ def train_one_epoch(
     preset: TrainingPreset,
     tokenizer: DnaTokenizer,
     epoch_offset: int,
+    prediction_unit: str = "base",
+    triplet_codec: Optional[TripletCodec] = None,
 ):
     model.train()
     total_loss = 0.0
@@ -458,6 +514,8 @@ def train_one_epoch(
                 logits,
                 tokenizer,
                 recovery_probability,
+                prediction_unit,
+                triplet_codec,
             )
             corrupted_tokens += changed_count
             eligible_recovery_tokens += eligible_count
@@ -481,6 +539,9 @@ def train_one_epoch(
                 loss_mask,
                 base_token_ids,
                 preset.homopolymer_min_run,
+                prediction_unit,
+                triplet_codec,
+                tokenizer,
             )
             loss = loss + preset.homopolymer_loss_weight * homopolymer_loss
             if position_count > 0:
@@ -506,12 +567,13 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, prediction_unit: str = "base", triplet_codec=None):
     model.eval()
     total_loss = 0.0
     correct_top1 = 0
     correct_top3 = 0
     total = 0
+    correct_bases = 0
     for batch in tqdm(loader, desc="Val"):
         input_ids, target_ids, attention_mask, loss_mask = unpack_batch(batch, device)
         logits = model(input_ids, attention_mask=attention_mask)
@@ -530,7 +592,14 @@ def evaluate(model, loader, device):
         if targets.numel() == 0:
             continue
         total += targets.numel()
-        correct_top1 += (scored_logits.argmax(dim=-1) == targets).sum().item()
+        predictions = scored_logits.argmax(dim=-1)
+        correct_top1 += (predictions == targets).sum().item()
+        if prediction_unit == "triplet":
+            predicted_bases = triplet_codec.base_ids(DnaTokenizer(), predictions.device)[predictions]
+            target_bases = triplet_codec.base_ids(DnaTokenizer(), targets.device)[targets]
+            correct_bases += (predicted_bases == target_bases).sum().item()
+        else:
+            correct_bases += (predictions == targets).sum().item()
         top3 = scored_logits.topk(min(3, scored_logits.shape[-1]), dim=-1).indices
         correct_top3 += (top3 == targets.unsqueeze(-1)).any(dim=-1).sum().item()
 
@@ -538,7 +607,9 @@ def evaluate(model, loader, device):
     return {
         "loss": avg_loss,
         "perplexity": math.exp(avg_loss),
+        "base_normalized_perplexity": math.exp(avg_loss / (3 if prediction_unit == "triplet" else 1)),
         "top1": correct_top1 / total if total else 0.0,
+        "per_base_accuracy": correct_bases / (total * (3 if prediction_unit == "triplet" else 1)) if total else 0.0,
         "top3": correct_top3 / total if total else 0.0,
         "tokens": total,
     }
@@ -612,14 +683,6 @@ def free_generation_metrics(
     runs_over_20 = 0
     low_complexity = 0
     evaluated = 0
-    forbidden = [
-        tokenizer.pad_token_id,
-        tokenizer.unk_token_id,
-        tokenizer.eos_token_id,
-    ]
-    if "N" in tokenizer.vocab:
-        forbidden.append(tokenizer.vocab["N"])
-
     for idx in range(min(max_windows, len(dataset))):
         tokens = dataset.window_tokens(idx)
         current_prompt_length = min(prompt_length, max(1, len(tokens) - 1))
@@ -628,13 +691,11 @@ def free_generation_metrics(
             continue
 
         prompt_ids = torch.tensor([tokens[:current_prompt_length]], dtype=torch.long, device=device)
-        output = model.generate(
+        output = generate_bases(
+            model,
+            tokenizer,
             prompt_ids,
-            max_new_tokens=current_generate_length,
-            eos_token_id=tokenizer.eos_token_id,
-            stop_at_eos=False,
-            forbidden_token_ids=tuple(forbidden),
-            min_new_tokens=current_generate_length,
+            max_new_bases=current_generate_length,
         )
         generated = output[0, current_prompt_length : current_prompt_length + current_generate_length].tolist()
         truth = tokens[current_prompt_length : current_prompt_length + current_generate_length]
@@ -670,7 +731,11 @@ def free_generation_metrics(
     return metrics
 
 
-def assert_resume_matches_preset(checkpoint: dict, preset: TrainingPreset) -> None:
+def assert_resume_matches_preset(
+    checkpoint: dict,
+    preset: TrainingPreset,
+    prediction_unit: str = "base",
+) -> None:
     config = checkpoint.get("model_config", {})
     model_type = checkpoint.get("model_type", config.get("model_type", "s4d"))
     expected = {"d_model": preset.d_model, "n_layers": preset.n_layers}
@@ -702,6 +767,13 @@ def assert_resume_matches_preset(checkpoint: dict, preset: TrainingPreset) -> No
             for key, (old, new) in mismatches.items()
         )
         raise ValueError(f"Resume checkpoint does not match preset {preset.name}: {details}")
+    checkpoint_unit = normalize_prediction_unit(
+        checkpoint.get("prediction_unit", config.get("prediction_unit"))
+    )
+    if checkpoint_unit != prediction_unit:
+        raise ValueError(
+            f"cannot resume {prediction_unit} training from a {checkpoint_unit} checkpoint"
+        )
 
 
 def build_datasets(
@@ -709,6 +781,8 @@ def build_datasets(
     tokenizer: DnaTokenizer,
     preset: TrainingPreset,
     holdout_accession: str,
+    prediction_unit: str = "base",
+    triplet_codec: Optional[TripletCodec] = None,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], DnaWindowDataset, DnaWindowDataset]:
     records = load_dna_records(
         fasta_file=fasta_file,
@@ -734,6 +808,8 @@ def build_datasets(
         prefix_max_fraction=preset.prefix_max_fraction,
         seed=preset.seed,
         records=train_records,
+        prediction_unit=prediction_unit,
+        triplet_codec=triplet_codec,
     )
     val_dataset = DnaWindowDataset(
         fasta_file=fasta_file,
@@ -746,6 +822,8 @@ def build_datasets(
         prefix_max_fraction=preset.prefix_max_fraction,
         seed=preset.seed + 1,
         records=val_records,
+        prediction_unit=prediction_unit,
+        triplet_codec=triplet_codec,
     )
     return train_records, val_records, train_dataset, val_dataset
 
@@ -755,10 +833,15 @@ def _model_config(
     preset: TrainingPreset,
     tokenizer: DnaTokenizer,
     model_type: str,
+    prediction_unit: str = "base",
 ) -> dict:
     shared = {
         "model_type": model_type,
         "vocab_size": tokenizer.vocab_size,
+        "input_vocab_size": tokenizer.vocab_size,
+        "output_vocab_size": model.output_vocab_size,
+        "prediction_unit": prediction_unit,
+        "bases_per_prediction": 3 if prediction_unit == "triplet" else 1,
         "d_model": model.d_model,
         "n_layers": model.n_layers,
         "dropout": preset.dropout,
@@ -799,7 +882,9 @@ def run_training(
     resume: Optional[str],
     holdout_accession: str,
     model_type: str = "s4d",
+    prediction_unit: str = "base",
 ) -> None:
+    prediction_unit = normalize_prediction_unit(prediction_unit)
     preset_options = TRANSFORMER_PRESETS if model_type == "transformer" else PRESETS
     if model_type not in {"s4d", "transformer"}:
         raise ValueError("model_type must be 's4d' or 'transformer'")
@@ -827,17 +912,20 @@ def run_training(
             raise ValueError(
                 f"cannot resume {model_type} training from a {checkpoint_type} checkpoint"
             )
-        assert_resume_matches_preset(resume_checkpoint, preset)
+        assert_resume_matches_preset(resume_checkpoint, preset, prediction_unit)
         tokenizer = tokenizer_from_checkpoint(resume_checkpoint)
         if "N" in tokenizer.vocab:
             raise ValueError("New DNA training checkpoints must use an A/C/G/T tokenizer without N")
 
     print("Loading DNA FASTA records...", flush=True)
+    triplet_codec = TripletCodec() if prediction_unit == "triplet" else None
     train_records, val_records, train_dataset, val_dataset = build_datasets(
         fasta_file=fasta_file,
         tokenizer=tokenizer,
         preset=preset,
         holdout_accession=holdout_accession,
+        prediction_unit=prediction_unit,
+        triplet_codec=triplet_codec,
     )
     data_fingerprints = {
         "train_records": record_fingerprint(train_records),
@@ -848,7 +936,16 @@ def run_training(
     train_loader = DataLoader(train_dataset, batch_size=preset.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=preset.batch_size, shuffle=False, num_workers=0)
 
-    model = build_sequence_model(tokenizer, preset, model_type=model_type).to(device)
+    model = build_sequence_model(
+        tokenizer,
+        preset,
+        model_type=model_type,
+        prediction_unit=prediction_unit,
+    ).to(device)
+    model.prediction_unit = prediction_unit
+    model.bases_per_prediction = 3 if prediction_unit == "triplet" else 1
+    if triplet_codec is not None:
+        model.output_tokens = triplet_codec.triplets
     optimizer = build_optimizer(model, preset.lr, preset.weight_decay)
     start_epoch = 0
     best_val = float("inf")
@@ -871,6 +968,8 @@ def run_training(
     print(f"  Train/val records: {len(train_records)}/{len(val_records)}")
     print(f"  Train/val windows: {len(train_dataset)}/{len(val_dataset)}")
     print(f"  Vocab size: {tokenizer.vocab_size}")
+    print(f"  Prediction unit: {prediction_unit}")
+    print(f"  Output classes: {model.output_vocab_size}")
     if model_type == "transformer":
         print(
             f"  Model: d_model={preset.d_model}, n_heads={preset.n_heads}, "
@@ -904,9 +1003,11 @@ def run_training(
             preset,
             tokenizer,
             epoch - start_epoch,
+            prediction_unit,
+            triplet_codec,
         )
         train_loss = train_epoch_metrics["loss"]
-        metrics = evaluate(model, val_loader, device)
+        metrics = evaluate(model, val_loader, device, prediction_unit, triplet_codec)
         free_metrics = free_generation_metrics(
             model,
             tokenizer,
@@ -925,6 +1026,8 @@ def run_training(
             "objective": "autocomplete",
             "data_type": "plastid_dna",
             "model_type": model_type,
+            "prediction_unit": prediction_unit,
+            "bases_per_prediction": 3 if prediction_unit == "triplet" else 1,
             "preset": preset.name,
             "preset_config": asdict(preset),
             "holdout_accession": holdout_accession,
@@ -941,7 +1044,14 @@ def run_training(
                 "current_probability": train_epoch_metrics["recovery_probability"],
             },
             "tokenizer_vocab": tokenizer.vocab,
-            "model_config": _model_config(model, preset, tokenizer, model_type),
+            "output_vocab": triplet_codec.triplets if triplet_codec is not None else None,
+            "model_config": _model_config(
+                model,
+                preset,
+                tokenizer,
+                model_type,
+                prediction_unit,
+            ),
         }
         torch.save(save, os.path.join(output_dir, "last.pt"))
         if is_best or not os.path.exists(os.path.join(output_dir, "best_loss.pt")):
@@ -963,7 +1073,9 @@ def run_training(
             f"corrupt_frac={train_epoch_metrics['corrupted_token_fraction']:.4f} "
             f"val_loss={metrics['loss']:.4f} "
             f"val_ppl={metrics['perplexity']:.3f} "
+            f"base_ppl={metrics['base_normalized_perplexity']:.3f} "
             f"top1={metrics['top1']:.4f} "
+            f"per_base={metrics['per_base_accuracy']:.4f} "
             f"top3={metrics['top3']:.4f} "
             f"free_acc={free_metrics['accuracy']:.4f} "
             f"free_longest_run={free_metrics['longest_generated_run']} "

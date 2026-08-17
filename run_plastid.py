@@ -14,6 +14,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--holdout-accession", default=DEFAULT_HOLDOUT)
+    parser.add_argument(
+        "--prediction-unit",
+        choices=("base", "triplet"),
+        default="base",
+    )
     return parser.parse_args()
 
 
@@ -25,6 +30,7 @@ def main() -> None:
         output_dir=args.output_dir,
         resume=args.resume,
         holdout_accession=args.holdout_accession,
+        prediction_unit=args.prediction_unit,
     )
 
 
