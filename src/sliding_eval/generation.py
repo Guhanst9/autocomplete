@@ -3,6 +3,7 @@ import torch
 from tqdm import tqdm
 
 from src.dna.checkpoint import load_model
+from src.dna.generation import generate_bases
 from src.sliding_eval.windows import SlidingWindow
 
 
@@ -46,20 +47,11 @@ def generate_windows(
         batch = windows[start : start + batch_size]
         prompt_ids = [tokenizer.encode(window.prompt) for window in batch]
         prompt_tensor = torch.tensor(prompt_ids, dtype=torch.long, device=device)
-        forbidden = [
-            tokenizer.pad_token_id,
-            tokenizer.unk_token_id,
-            tokenizer.eos_token_id,
-        ]
-        if "N" in tokenizer.vocab:
-            forbidden.append(tokenizer.vocab["N"])
-        output = model.generate(
+        output = generate_bases(
+            model,
+            tokenizer,
             prompt_tensor,
-            max_new_tokens=generate_length,
-            eos_token_id=tokenizer.eos_token_id,
-            stop_at_eos=False,
-            forbidden_token_ids=tuple(forbidden),
-            min_new_tokens=generate_length,
+            max_new_bases=generate_length,
             sampling_temperature=temperature if decoding_mode == "sampled" else None,
         )
         for window, token_ids in zip(batch, output.tolist()):

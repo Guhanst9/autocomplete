@@ -10,6 +10,7 @@ from src.biological_eval.config import require_keys
 from src.biological_eval.context_topk import exact_identity, parse_int_list, write_csv
 from src.biological_eval.sliding import load_panel_records, selected_panel
 from src.dna.checkpoint import load_model
+from src.dna.generation import generate_bases
 from src.sliding_eval.regions import Region, infer_regions, reverse_complement
 from src.sliding_eval.windows import slice_sequence
 
@@ -35,15 +36,12 @@ def paired_offsets(ira: Region, irb: Region, target_length: int, max_pairs: int 
 
 def generate_suffix(model, tokenizer, device, prompt: str, length: int, seed: int, temperature: float) -> str:
     torch.manual_seed(seed)
-    forbidden = (tokenizer.pad_token_id, tokenizer.unk_token_id, tokenizer.eos_token_id)
     prompt_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
-    output = model.generate(
+    output = generate_bases(
+        model,
+        tokenizer,
         prompt_ids,
-        max_new_tokens=length,
-        eos_token_id=tokenizer.eos_token_id,
-        stop_at_eos=False,
-        forbidden_token_ids=forbidden,
-        min_new_tokens=length,
+        max_new_bases=length,
         sampling_temperature=temperature,
     )
     return tokenizer.decode(output[0, len(prompt) :].tolist(), stop_at_eos=False)

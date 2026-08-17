@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 
 from src.dna.checkpoint import load_model
+from src.dna.generation import generate_bases
 
 
 DEFAULT_CHECKPOINT = "outputs/plastid_s4d_v2_recovery_full/best_loss.pt"
@@ -76,22 +77,11 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    forbidden = {
-        tokenizer.pad_token_id,
-        tokenizer.unk_token_id,
-        tokenizer.eos_token_id,
-    }
-    n_token_id = tokenizer.vocab.get("N")
-    if n_token_id is not None:
-        forbidden.add(n_token_id)
-
-    output = model.generate(
+    output = generate_bases(
+        model,
+        tokenizer,
         prompt_tensor,
-        max_new_tokens=args.max_new_bases,
-        use_recurrent=True,
-        stop_at_eos=False,
-        forbidden_token_ids=tuple(sorted(forbidden)),
-        min_new_tokens=args.max_new_bases,
+        max_new_bases=args.max_new_bases,
         sampling_temperature=args.temperature if args.decoding_mode == "sampled" else None,
     )
     generated_ids = output[0, len(prompt_ids) :].tolist()
@@ -101,6 +91,7 @@ def main() -> None:
     print(f"  Checkpoint: {args.checkpoint}")
     print(f"  Device: {device}")
     print(f"  Model type: {getattr(model, 'model_type', 's4d')}")
+    print(f"  Prediction unit: {getattr(model, 'prediction_unit', 'base')}")
     print(f"  Prompt length: {len(prompt)}")
     print(f"  Generated length: {len(generated)}")
     print(f"  Decoding mode: {args.decoding_mode}")

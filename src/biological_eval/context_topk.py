@@ -10,6 +10,7 @@ from tqdm import tqdm
 from src.biological_eval.config import require_keys
 from src.biological_eval.sliding import load_panel_records, selected_panel
 from src.dna.checkpoint import load_model
+from src.dna.generation import generate_bases
 from src.sliding_eval.windows import slice_sequence
 
 
@@ -137,7 +138,6 @@ def run_context(
     panel = selected_panel(config, max_genomes)
     records = load_panel_records(config["raw_fasta"], panel)
     model, tokenizer, device = load_model(config["checkpoint"])
-    forbidden = (tokenizer.pad_token_id, tokenizer.unk_token_id, tokenizer.eos_token_id)
     rows: list[dict[str, Any]] = []
 
     tasks = []
@@ -162,13 +162,11 @@ def run_context(
     for record, target_start, context_length, prompt, truth, seed in tqdm(tasks, desc="Context generations"):
         prompt_ids = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
         torch.manual_seed(seed)
-        output = model.generate(
+        output = generate_bases(
+            model,
+            tokenizer,
             prompt_ids,
-            max_new_tokens=int(config["generation_length"]),
-            eos_token_id=tokenizer.eos_token_id,
-            stop_at_eos=False,
-            forbidden_token_ids=forbidden,
-            min_new_tokens=int(config["generation_length"]),
+            max_new_bases=int(config["generation_length"]),
             sampling_temperature=float(config["primary_decoding"]["temperature"]),
         )
         generated = tokenizer.decode(output[0, len(prompt) :].tolist(), stop_at_eos=False)
@@ -215,6 +213,8 @@ def run_topk(
     panel = selected_panel(config, max_genomes)
     records = load_panel_records(config["raw_fasta"], panel)
     model, tokenizer, device = load_model(config["checkpoint"])
+    if getattr(model, "prediction_unit", "base") != "base":
+        raise ValueError("top-k base evaluation currently requires a one-base checkpoint")
     base_ids = torch.tensor([tokenizer.vocab[base] for base in "ACGT"], device=device)
     rows: list[dict[str, Any]] = []
 
