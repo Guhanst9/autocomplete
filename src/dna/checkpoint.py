@@ -1,6 +1,7 @@
 import torch
 
 from src.dna.data import DnaTokenizer
+from src.dna.prediction import TripletCodec, normalize_prediction_unit
 from src.models.s4_model import S4SequenceModel
 from src.models.transformer_model import TransformerSequenceModel
 
@@ -14,9 +15,16 @@ def tokenizer_from_checkpoint(checkpoint: dict) -> DnaTokenizer:
 
 def build_model_from_config(config: dict, tokenizer: DnaTokenizer) -> torch.nn.Module:
     model_type = config.get("model_type", "s4d")
+    prediction_unit = normalize_prediction_unit(config.get("prediction_unit"))
+    output_vocab_size = config.get(
+        "output_vocab_size",
+        64 if prediction_unit == "triplet" else tokenizer.vocab_size,
+    )
     if model_type == "transformer":
         return TransformerSequenceModel(
             vocab_size=tokenizer.vocab_size,
+            input_vocab_size=tokenizer.vocab_size,
+            output_vocab_size=output_vocab_size,
             d_model=config.get("d_model", 384),
             n_heads=config.get("n_heads", 6),
             n_layers=config.get("n_layers", 9),
@@ -31,6 +39,8 @@ def build_model_from_config(config: dict, tokenizer: DnaTokenizer) -> torch.nn.M
         raise ValueError(f"unsupported checkpoint model_type: {model_type}")
     return S4SequenceModel(
         vocab_size=tokenizer.vocab_size,
+        input_vocab_size=tokenizer.vocab_size,
+        output_vocab_size=output_vocab_size,
         d_model=config.get("d_model", 448),
         d_state=config.get("d_state", 64),
         n_layers=config.get("n_layers", 10),
@@ -62,5 +72,11 @@ def load_model(checkpoint: str):
     config.setdefault("model_type", ckpt.get("model_type", "s4d"))
     model = build_model_from_config(config, tokenizer).to(device)
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    model.prediction_unit = normalize_prediction_unit(
+        ckpt.get("prediction_unit", config.get("prediction_unit"))
+    )
+    model.bases_per_prediction = 3 if model.prediction_unit == "triplet" else 1
+    if model.prediction_unit == "triplet":
+        model.output_tokens = TripletCodec(ckpt.get("output_vocab")).triplets
     model.eval()
     return model, tokenizer, device

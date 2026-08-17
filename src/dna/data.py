@@ -6,6 +6,8 @@ from typing import Iterable, Optional
 import torch
 from torch.utils.data import Dataset
 
+from src.dna.prediction import TripletCodec, normalize_prediction_unit
+
 
 class DnaTokenizer:
     def __init__(self, include_n: bool = False, vocab: Optional[dict[str, int]] = None):
@@ -143,6 +145,8 @@ class DnaWindowDataset(Dataset):
         prefix_max_fraction: float,
         seed: int,
         records: list[tuple[str, str]],
+        prediction_unit: str = "base",
+        triplet_codec: Optional[TripletCodec] = None,
     ):
         if l_max < 4:
             raise ValueError("l_max must be at least 4")
@@ -155,6 +159,8 @@ class DnaWindowDataset(Dataset):
         self.stride = stride or l_max
         self.prefix_min_fraction = prefix_min_fraction
         self.prefix_max_fraction = prefix_max_fraction
+        self.prediction_unit = normalize_prediction_unit(prediction_unit)
+        self.triplet_codec = triplet_codec or TripletCodec()
         self.windows: list[Window] = []
         self.first_header = ""
         self.first_sequence = ""
@@ -187,15 +193,15 @@ class DnaWindowDataset(Dataset):
         rng.shuffle(self.windows)
 
     def _add_windows(self, encoded: list[int], max_windows: Optional[int]) -> None:
-        # reserve eos space only for true record endings
         internal_window_len = self.l_max
-        final_window_len = self.l_max - 1
+        final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
+        minimum_length = 3 if self.prediction_unit == "base" else 4
         for start in range(0, len(encoded), self.stride):
             remaining = len(encoded) - start
             reaches_end = remaining <= final_window_len
             chunk_len = final_window_len if reaches_end else internal_window_len
             chunk = encoded[start : start + chunk_len]
-            if len(chunk) < 3:
+            if len(chunk) < minimum_length:
                 continue
             ends_sequence = start + len(chunk) >= len(encoded)
             self.windows.append(Window(tokens=chunk, ends_sequence=ends_sequence))
@@ -213,12 +219,14 @@ class DnaWindowDataset(Dataset):
             raise ValueError("windows_per_record must be positive")
         starts = list(range(0, len(encoded), self.stride))
         rng.shuffle(starts)
+        final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
+        minimum_length = 3 if self.prediction_unit == "base" else 4
         for start in starts[:windows_per_record]:
             remaining = len(encoded) - start
-            reaches_end = remaining <= self.l_max - 1
-            chunk_len = self.l_max - 1 if reaches_end else self.l_max
+            reaches_end = remaining <= final_window_len
+            chunk_len = final_window_len if reaches_end else self.l_max
             chunk = encoded[start : start + chunk_len]
-            if len(chunk) < 3:
+            if len(chunk) < minimum_length:
                 continue
             ends_sequence = start + len(chunk) >= len(encoded)
             self.windows.append(Window(tokens=chunk, ends_sequence=ends_sequence))
@@ -231,7 +239,7 @@ class DnaWindowDataset(Dataset):
     def window_tokens(self, idx: int) -> list[int]:
         item = self.windows[idx]
         tokens = item.tokens.copy()
-        if item.ends_sequence and len(tokens) < self.l_max:
+        if self.prediction_unit == "base" and item.ends_sequence and len(tokens) < self.l_max:
             tokens.append(self.tokenizer.eos_token_id)
         return tokens[: self.l_max]
 
@@ -245,13 +253,22 @@ class DnaWindowDataset(Dataset):
         prefix_len = random.randint(min_prefix, max_prefix)
 
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.l_max - seq_len)
-        target_ids = tokens[1:] + [self.tokenizer.pad_token_id]
-        target_ids += [self.tokenizer.pad_token_id] * (self.l_max - len(target_ids))
+        if self.prediction_unit == "base":
+            target_ids = tokens[1:] + [self.tokenizer.pad_token_id]
+            target_ids += [self.tokenizer.pad_token_id] * (self.l_max - len(target_ids))
+            last_target_position = seq_len - 1
+        else:
+            target_ids = [0] * self.l_max
+            for pos in range(max(0, seq_len - 3)):
+                triplet = self.tokenizer.decode(tokens[pos + 1 : pos + 4], stop_at_eos=False)
+                if len(triplet) == 3 and set(triplet) <= set("ACGT"):
+                    target_ids[pos] = self.triplet_codec.encode(triplet)
+            last_target_position = seq_len - 3
         attention_mask = [1] * seq_len + [0] * (self.l_max - seq_len)
 
         loss_mask = [0] * self.l_max
         start = max(0, prefix_len - 1)
-        for pos in range(start, seq_len - 1):
+        for pos in range(start, max(start, last_target_position)):
             loss_mask[pos] = 1
 
         return (

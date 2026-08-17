@@ -166,9 +166,13 @@ class TransformerSequenceModel(nn.Module):
         mask_token_id: int = 1,
         eos_token_id: Optional[int] = None,
         max_length: int = 1024,
+        input_vocab_size: Optional[int] = None,
+        output_vocab_size: Optional[int] = None,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
+        self.input_vocab_size = input_vocab_size or vocab_size
+        self.output_vocab_size = output_vocab_size or vocab_size
+        self.vocab_size = self.output_vocab_size
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -180,7 +184,7 @@ class TransformerSequenceModel(nn.Module):
         self.max_length = max_length
         self.model_type = "transformer"
 
-        self.embed = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
+        self.embed = nn.Embedding(self.input_vocab_size, d_model, padding_idx=pad_token_id)
         self.embedding_dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList(
             [
@@ -189,9 +193,10 @@ class TransformerSequenceModel(nn.Module):
             ]
         )
         self.ln_f = nn.LayerNorm(d_model)
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.lm_head = nn.Linear(d_model, self.output_vocab_size, bias=False)
         self.apply(_init_weights)
-        self.lm_head.weight = self.embed.weight
+        if self.input_vocab_size == self.output_vocab_size:
+            self.lm_head.weight = self.embed.weight
 
     def forward(
         self,
@@ -342,6 +347,66 @@ class TransformerSequenceModel(nn.Module):
             )
             next_logits = step_logits[:, -1, :]
 
+        return torch.tensor(generated, dtype=prompt_ids.dtype, device=prompt_ids.device)
+
+    @torch.no_grad()
+    def generate_triplets(
+        self,
+        prompt_ids: torch.Tensor,
+        triplet_base_ids: torch.Tensor,
+        max_new_bases: int,
+        sampling_temperature: Optional[float] = None,
+    ) -> torch.Tensor:
+        if max_new_bases < 0:
+            raise ValueError("max_new_bases cannot be negative")
+        if prompt_ids.size(1) == 0:
+            raise ValueError("prompt cannot be empty")
+        batch, prompt_length = prompt_ids.shape
+        context = prompt_ids[:, -self.max_length :]
+        context_start = prompt_length - context.size(1)
+        logits, cache = self.forward(context, use_cache=True, position_offset=context_start)
+        next_logits = logits[:, -1, :]
+        generated = prompt_ids.tolist()
+        generated_count = 0
+        triplet_base_ids = triplet_base_ids.to(prompt_ids.device)
+
+        while generated_count < max_new_bases:
+            class_ids = _choose_token(
+                next_logits,
+                None,
+                None,
+                False,
+                0,
+                generated_count,
+                sampling_temperature,
+                torch.zeros(batch, dtype=torch.bool, device=prompt_ids.device),
+            )
+            next_bases = triplet_base_ids[class_ids]
+            for offset in range(3):
+                if generated_count >= max_new_bases:
+                    break
+                next_token = next_bases[:, offset]
+                for batch_index in range(batch):
+                    generated[batch_index].append(next_token[batch_index].item())
+                generated_count += 1
+                if generated_count >= max_new_bases:
+                    break
+                if self.max_length > 1:
+                    cache = [
+                        (
+                            key[:, :, -(self.max_length - 1) :, :],
+                            value[:, :, -(self.max_length - 1) :, :],
+                        )
+                        for key, value in cache
+                    ]
+                position = prompt_length + generated_count - 1
+                step_logits, cache = self.forward(
+                    next_token[:, None],
+                    past_key_values=cache,
+                    use_cache=True,
+                    position_offset=position,
+                )
+                next_logits = step_logits[:, -1, :]
         return torch.tensor(generated, dtype=prompt_ids.dtype, device=prompt_ids.device)
 
     @torch.no_grad()

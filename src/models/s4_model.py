@@ -35,9 +35,13 @@ class S4SequenceModel(nn.Module):
         mask_token_id: int = 1,
         eos_token_id: Optional[int] = None,
         max_length: int = 1024,
+        input_vocab_size: Optional[int] = None,
+        output_vocab_size: Optional[int] = None,
     ):
         super().__init__()
-        self.vocab_size = vocab_size
+        self.input_vocab_size = input_vocab_size or vocab_size
+        self.output_vocab_size = output_vocab_size or vocab_size
+        self.vocab_size = self.output_vocab_size
         self.d_model = d_model
         self.d_state = d_state
         self.n_layers = n_layers
@@ -54,7 +58,7 @@ class S4SequenceModel(nn.Module):
         if kernel_type != "diag":
             raise ValueError("active model only supports kernel_type='diag'")
 
-        self.embed = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
+        self.embed = nn.Embedding(self.input_vocab_size, d_model, padding_idx=pad_token_id)
         self.blocks = nn.ModuleList([
             S4Block(
                 d_model=d_model,
@@ -68,7 +72,7 @@ class S4SequenceModel(nn.Module):
             for _ in range(n_layers)
         ])
         self.ln_f = nn.LayerNorm(d_model)
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.lm_head = nn.Linear(d_model, self.output_vocab_size, bias=False)
         self.embed.weight.data.normal_(mean=0.0, std=0.02)
         self.apply(_init_weights)
 
@@ -230,6 +234,46 @@ class S4SequenceModel(nn.Module):
 
         output = torch.tensor(generated, device=device, dtype=prompt_ids.dtype)
         return output
+
+    @torch.no_grad()
+    def generate_triplets(
+        self,
+        prompt_ids: torch.Tensor,
+        triplet_base_ids: torch.Tensor,
+        max_new_bases: int,
+        sampling_temperature: Optional[float] = None,
+    ) -> torch.Tensor:
+        if max_new_bases < 0:
+            raise ValueError("max_new_bases cannot be negative")
+        if prompt_ids.size(1) == 0:
+            raise ValueError("prompt cannot be empty")
+        batch, prompt_len = prompt_ids.shape
+        states = [block.default_state(batch, prompt_ids.device) for block in self.blocks]
+        for pos in range(prompt_len):
+            x = self.embed(prompt_ids[:, pos])
+            for index, block in enumerate(self.blocks):
+                x, states[index] = block.step(x, states[index])
+
+        generated = prompt_ids.tolist()
+        generated_count = 0
+        triplet_base_ids = triplet_base_ids.to(prompt_ids.device)
+        while generated_count < max_new_bases:
+            logits = self.lm_head(self.ln_f(x))
+            _validate_generation_logits(logits)
+            class_ids = _select_next_token(logits, sampling_temperature)
+            next_bases = triplet_base_ids[class_ids]
+            for offset in range(3):
+                if generated_count >= max_new_bases:
+                    break
+                next_token = next_bases[:, offset]
+                for batch_index in range(batch):
+                    generated[batch_index].append(next_token[batch_index].item())
+                generated_count += 1
+                if generated_count < max_new_bases:
+                    x = self.embed(next_token)
+                    for index, block in enumerate(self.blocks):
+                        x, states[index] = block.step(x, states[index])
+        return torch.tensor(generated, device=prompt_ids.device, dtype=prompt_ids.dtype)
 
     @torch.no_grad()
     def _generate_forward(
