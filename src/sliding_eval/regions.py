@@ -1,3 +1,4 @@
+from collections import defaultdict
 from dataclasses import dataclass
 
 
@@ -25,80 +26,99 @@ def reverse_complement(sequence: str) -> str:
     return sequence.translate(DNA_COMPLEMENT)[::-1]
 
 
-def extend_reverse_repeat(sequence: str, left_start: int, right_seed_start: int, seed_length: int) -> Region:
-    n = len(sequence)
-    left_extra = 0
-    while (
-        left_start - 1 - left_extra >= 0
-        and right_seed_start + seed_length + left_extra < n
-        and sequence[left_start - 1 - left_extra]
-        == sequence[right_seed_start + seed_length + left_extra].translate(DNA_COMPLEMENT)
-    ):
-        left_extra += 1
-
-    right_extra = 0
-    while (
-        left_start + seed_length + right_extra < n
-        and right_seed_start - 1 - right_extra >= 0
-        and sequence[left_start + seed_length + right_extra]
-        == sequence[right_seed_start - 1 - right_extra].translate(DNA_COMPLEMENT)
-    ):
-        right_extra += 1
-
-    start = left_start - left_extra
-    end = left_start + seed_length + right_extra
-    return Region("repeat", start, end)
+def region_map_from_repeats(
+    first_start: int,
+    first_end: int,
+    second_start: int,
+    second_end: int,
+    genome_length: int,
+    status: str,
+    first_name: str = "IRB",
+    second_name: str = "IRA",
+) -> RegionMap:
+    first = Region(first_name, first_start, first_end)
+    second = Region(second_name, second_start, second_end)
+    gap_between = Region("single_copy", first_end, second_start)
+    gap_wrap = Region("single_copy", second_end, genome_length + first_start)
+    lsc_gap, ssc_gap = sorted([gap_between, gap_wrap], key=lambda region: region.length, reverse=True)
+    return RegionMap(
+        [
+            first,
+            second,
+            Region("LSC", lsc_gap.start, lsc_gap.end),
+            Region("SSC", ssc_gap.start, ssc_gap.end),
+        ],
+        status,
+    )
 
 
 def infer_regions(
     sequence: str,
-    seed_length: int = 80,
-    scan_step: int = 50,
+    seed_length: int = 31,
+    scan_step: int = 10,
     min_ir_length: int = 10000,
     min_ir_spacing: int = 10000,
+    max_diagonal_shift: int = 10,
 ) -> RegionMap:
-    positions: dict[str, list[int]] = {}
+    positions: dict[str, list[int]] = defaultdict(list)
     n = len(sequence)
-    for start in range(0, n - seed_length + 1):
+    for start in range(n - seed_length + 1):
         seed = sequence[start : start + seed_length]
-        if "N" in seed:
-            continue
-        positions.setdefault(seed, []).append(start)
+        if "N" not in seed:
+            positions[seed].append(start)
 
-    best_pair: tuple[int, int, int, int] | None = None
-    best_length = 0
+    diagonals: dict[int, list[tuple[int, int]]] = defaultdict(list)
     for left_start in range(0, n - seed_length + 1, scan_step):
         seed = sequence[left_start : left_start + seed_length]
         if "N" in seed:
             continue
-        rc_seed = reverse_complement(seed)
-        for right_start in positions.get(rc_seed, []):
-            if abs(left_start - right_start) < min_ir_spacing:
+        for right_start in positions.get(reverse_complement(seed), []):
+            if right_start - left_start < min_ir_spacing:
                 continue
-            left = extend_reverse_repeat(sequence, left_start, right_start, seed_length)
-            right = extend_reverse_repeat(sequence, right_start, left_start, seed_length)
-            if left.length < min_ir_length or right.length < min_ir_length:
-                continue
-            first, second = sorted([left, right], key=lambda region: region.start)
-            if first.length > best_length:
-                best_pair = (first.start, first.end, second.start, second.end)
-                best_length = first.length
+            diagonals[left_start + right_start].append((left_start, right_start))
 
-    if best_pair is None:
+    eligible: list[tuple[int, list[tuple[int, int]]]] = []
+    minimum_anchor_span = max(200, min(1000, min_ir_length // 5))
+    for diagonal, anchors in diagonals.items():
+        if len(anchors) < 20:
+            continue
+        left_positions = [left for left, _ in anchors]
+        span = max(left_positions) - min(left_positions) + seed_length
+        if span >= minimum_anchor_span:
+            eligible.append((diagonal, anchors))
+    eligible.sort(key=lambda item: item[0])
+
+    groups: list[list[tuple[int, list[tuple[int, int]]]]] = []
+    for diagonal, anchors in eligible:
+        if not groups or diagonal - groups[-1][-1][0] > max_diagonal_shift:
+            groups.append([])
+        groups[-1].append((diagonal, anchors))
+
+    candidates: list[tuple[int, int, int, int, int, int]] = []
+    for group in groups:
+        anchors = [anchor for _, items in group for anchor in items]
+        left_positions = [left for left, _ in anchors]
+        right_positions = [right for _, right in anchors]
+        left_start = min(left_positions)
+        left_end = max(left_positions) + seed_length
+        right_start = min(right_positions)
+        right_end = max(right_positions) + seed_length
+        span = left_end - left_start
+        if span >= min_ir_length:
+            candidates.append((span, len(anchors), left_start, left_end, right_start, right_end))
+
+    if not candidates:
         return RegionMap([Region("unknown", 0, n)], "unknown")
 
-    ir_a_start, ir_a_end, ir_b_start, ir_b_end = best_pair
-    gap_between = Region("single_copy", ir_a_end, ir_b_start)
-    gap_wrap = Region("single_copy", ir_b_end, n + ir_a_start)
-    lsc_gap, ssc_gap = sorted([gap_between, gap_wrap], key=lambda region: region.length, reverse=True)
-
-    regions = [
-        Region("IRA", ir_a_start, ir_a_end),
-        Region("IRB", ir_b_start, ir_b_end),
-        Region("LSC", lsc_gap.start, lsc_gap.end),
-        Region("SSC", ssc_gap.start, ssc_gap.end),
-    ]
-    return RegionMap(regions, "inferred")
+    _, _, first_start, first_end, second_start, second_end = max(candidates)
+    return region_map_from_repeats(
+        first_start,
+        first_end,
+        second_start,
+        second_end,
+        n,
+        "sequence-inferred",
+    )
 
 
 def coordinate_in_region(position: int, region: Region, genome_length: int) -> bool:
@@ -111,7 +131,7 @@ def coordinate_in_region(position: int, region: Region, genome_length: int) -> b
 
 
 def label_interval(start: int, end: int, region_map: RegionMap, genome_length: int) -> str:
-    if region_map.status != "inferred":
+    if region_map.status == "unknown":
         return "unknown"
 
     labels = set()

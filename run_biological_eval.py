@@ -8,7 +8,7 @@ from src.biological_eval.ir import run_ir
 from src.biological_eval.reporting import run_figures, run_report
 from src.biological_eval.baseline import run_baseline_check
 from src.biological_eval.prepare import run_prepare
-from src.biological_eval.sliding import run_sliding
+from src.biological_eval.sliding import run_relabel, run_sliding
 from src.biological_eval.summary import run_summarize
 
 
@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
             "baseline-check",
             "annotations",
             "sliding",
+            "relabel",
             "summarize",
             "features",
             "context",
@@ -71,6 +72,8 @@ def main() -> None:
         )
     elif args.stage == "summarize":
         run_summarize(args.output_dir, args.reports_dir)
+    elif args.stage == "relabel":
+        run_relabel(config, args.output_dir, max_genomes=args.max_genomes)
     elif args.stage == "features":
         run_features(args.output_dir, args.reports_dir)
     elif args.stage == "context":

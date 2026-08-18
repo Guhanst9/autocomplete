@@ -2,10 +2,11 @@ import csv
 from pathlib import Path
 from typing import Any
 
+from src.biological_eval.annotations import genbank_region_map
 from src.biological_eval.config import require_keys
 from src.sliding_eval.fasta import PlastidRecord, stream_fasta
 from src.sliding_eval.generation import generate_windows
-from src.sliding_eval.regions import infer_regions
+from src.sliding_eval.regions import RegionMap, infer_regions, label_interval
 from src.sliding_eval.windows import build_windows, write_windows_csv
 
 
@@ -34,6 +35,15 @@ def load_panel_records(fasta_file: str, panel: list[dict[str, Any]]) -> dict[str
             if len(records) == len(wanted):
                 break
     return records
+
+
+def load_region_map(accession: str, sequence: str, output_dir: str) -> RegionMap:
+    genbank_path = Path(output_dir) / "annotations" / f"{accession}.gb"
+    if genbank_path.exists():
+        region_map = genbank_region_map(genbank_path)
+        if region_map is not None:
+            return region_map
+    return infer_regions(sequence)
 
 
 def temperature_label(temperature: float) -> str:
@@ -134,7 +144,7 @@ def run_sliding(
             )
             continue
 
-        region_map = infer_regions(record.sequence)
+        region_map = load_region_map(accession, record.sequence, output_dir)
         for seed in seeds:
             target_dir = run_output_dir(
                 output_dir,
@@ -193,3 +203,54 @@ def run_sliding(
     print(f"  Seeds: {','.join(str(seed) for seed in seeds)}")
     print(f"  Manifest: {manifest_path}")
 
+
+def run_relabel(config: dict[str, Any], output_dir: str, max_genomes: int | None) -> None:
+    require_keys(config, ["raw_fasta", "panel"])
+    panel = selected_panel(config, max_genomes)
+    records = load_panel_records(config["raw_fasta"], panel)
+    maps = {
+        accession: load_region_map(accession, record.sequence, output_dir)
+        for accession, record in records.items()
+    }
+    changed = 0
+    row_count = 0
+    csv_count = 0
+    for csv_path in sorted(Path(output_dir).glob("sliding*/*/*/*_windows.csv")):
+        with csv_path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        if not rows:
+            continue
+        accession = rows[0]["accession"]
+        record = records.get(accession)
+        region_map = maps.get(accession)
+        if record is None or region_map is None:
+            continue
+        if "region_source" not in fieldnames:
+            fieldnames.insert(fieldnames.index("region") + 1, "region_source")
+        for row in rows:
+            target_start = int(row["target_start"])
+            target_length = len(row["true_suffix"])
+            new_region = label_interval(
+                target_start,
+                target_start + target_length,
+                region_map,
+                record.length,
+            )
+            changed += new_region != row["region"]
+            row["region"] = new_region
+            row["region_source"] = region_map.status
+            row_count += 1
+        temporary = csv_path.with_suffix(".csv.tmp")
+        with temporary.open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        temporary.replace(csv_path)
+        csv_count += 1
+
+    print("Relabel stage complete")
+    print(f"  CSV files: {csv_count}")
+    print(f"  Rows: {row_count}")
+    print(f"  Changed labels: {changed}")

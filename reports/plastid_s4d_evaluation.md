@@ -22,11 +22,11 @@ The checkpoint is the 16.57M-parameter S4D-v2 model trained with 1,024-base cont
 
 | accession | group | exposure | decoding_mode | seed | region | rows | avg_accuracy_percent | min_accuracy_percent | max_accuracy_percent | avg_gc_difference_percent | max_longest_generated_run | runs_over_20 | n_count |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| NC_023110.1 | Sunflower | validation | sampled | 13 | IRA | 94 | 66.10 | 24.02 | 99.80 | 2.94 | 10 | 0 | 0 |
-| NC_023110.1 | Sunflower | validation | sampled | 13 | IRB | 95 | 68.54 | 23.83 | 99.80 | 3.58 | 15 | 0 | 0 |
-| NC_023110.1 | Sunflower | validation | sampled | 13 | LSC | 393 | 44.15 | 23.63 | 97.85 | 13.32 | 17 | 0 | 0 |
+| NC_023110.1 | Sunflower | validation | sampled | 13 | IRA | 95 | 68.54 | 23.83 | 99.80 | 3.58 | 15 | 0 | 0 |
+| NC_023110.1 | Sunflower | validation | sampled | 13 | IRB | 94 | 66.10 | 24.02 | 99.80 | 2.94 | 10 | 0 | 0 |
+| NC_023110.1 | Sunflower | validation | sampled | 13 | LSC | 324 | 46.61 | 23.63 | 97.85 | 13.04 | 17 | 0 | 0 |
+| NC_023110.1 | Sunflower | validation | sampled | 13 | SSC | 69 | 32.58 | 27.34 | 42.19 | 14.60 | 12 | 0 | 0 |
 | NC_023110.1 | Sunflower | validation | sampled | 13 | boundary | 8 | 52.12 | 33.01 | 86.72 | 8.33 | 14 | 0 | 0 |
-| NC_027476.1 | Grass | validation | sampled | 13 | IRA | 80 | 52.51 | 23.63 | 98.44 | 7.36 | 10 | 0 | 0 |
 
 ## CDS, tRNA, and rRNA results
 
@@ -78,4 +78,4 @@ Synthetic evaluation remains a separate check through `run_synthetic_eval.py`. I
 
 ## Limitations and next experiments
 
-The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
+The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank repeat boundaries are used when available. Other genomes use mismatch-tolerant sequence inference, and each generated CSV records the boundary source. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.

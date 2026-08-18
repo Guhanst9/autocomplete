@@ -8,19 +8,19 @@ from tqdm import tqdm
 
 from src.biological_eval.config import require_keys
 from src.biological_eval.context_topk import exact_identity, parse_int_list, write_csv
-from src.biological_eval.sliding import load_panel_records, selected_panel
+from src.biological_eval.sliding import load_panel_records, load_region_map, selected_panel
 from src.dna.checkpoint import load_model
 from src.dna.generation import generate_bases
-from src.sliding_eval.regions import Region, infer_regions, reverse_complement
+from src.sliding_eval.regions import Region, reverse_complement
 from src.sliding_eval.windows import slice_sequence
 
 
-def inferred_ir_regions(sequence: str) -> tuple[Region, Region, str]:
-    region_map = infer_regions(sequence)
+def ir_regions(accession: str, sequence: str, output_dir: str) -> tuple[Region, Region, str]:
+    region_map = load_region_map(accession, sequence, output_dir)
     regions = {region.name: region for region in region_map.regions}
     if "IRA" not in regions or "IRB" not in regions:
         raise ValueError("could not infer IRA/IRB regions")
-    return regions["IRA"], regions["IRB"], "sequence-inferred"
+    return regions["IRA"], regions["IRB"], region_map.status
 
 
 def paired_offsets(ira: Region, irb: Region, target_length: int, max_pairs: int | None) -> list[int]:
@@ -68,7 +68,11 @@ def run_ir(
         record = records.get(item["accession"])
         if record is None:
             continue
-        ira, irb, boundary_source = inferred_ir_regions(record.sequence)
+        ira, irb, boundary_source = ir_regions(
+            record.accession,
+            record.sequence,
+            output_dir,
+        )
         target_length = int(config["generation_length"])
         prompt_length = int(config["prompt_length"])
         for offset in paired_offsets(ira, irb, target_length, max_pairs):

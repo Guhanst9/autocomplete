@@ -17,6 +17,7 @@ class SlidingWindow:
     region: str
     prompt: str
     true_suffix: str
+    region_source: str = ""
     generated_suffix: str = ""
     generated_length: int | None = None
     accuracy_percent: float | None = None
@@ -64,6 +65,7 @@ def build_windows(
                 region=label_interval(target_start_abs, target_end_abs, region_map, record.length),
                 prompt=slice_sequence(record.sequence, start, prompt_length, circular),
                 true_suffix=slice_sequence(record.sequence, target_start_abs, generate_length, circular),
+                region_source=region_map.status,
             )
         )
         if max_windows is not None and len(windows) >= max_windows:
@@ -126,6 +128,7 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
         "target_start",
         "target_end",
         "region",
+        "region_source",
         "generated_length",
         "accuracy_percent",
         "decoding_mode",
@@ -151,6 +154,7 @@ def write_windows_csv(record: PlastidRecord, windows: list[SlidingWindow], outpu
                     "target_start": window.target_start,
                     "target_end": window.target_end,
                     "region": window.region,
+                    "region_source": window.region_source,
                     "generated_length": "" if window.generated_length is None else window.generated_length,
                     "accuracy_percent": (
                         "" if window.accuracy_percent is None else f"{window.accuracy_percent:.2f}"

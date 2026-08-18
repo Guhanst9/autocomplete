@@ -13,7 +13,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -157,4 +157,3 @@ def run_summarize(output_dir: str, reports_dir: str) -> None:
     print(f"  Sliding CSVs: {len(manifest_rows)}")
     print(f"  Window rows: {len(window_rows)}")
     print(f"  Reports: {reports}")
-

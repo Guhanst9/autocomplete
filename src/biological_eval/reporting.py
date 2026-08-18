@@ -213,7 +213,7 @@ Synthetic evaluation remains a separate check through `run_synthetic_eval.py`. I
 
 ## Limitations and next experiments
 
-The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank annotations are used for feature labels, while IRA/IRB currently falls back to sequence inference when annotation boundaries are unavailable. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
+The current report is based on the full local panel evaluation for the seven selected plastid genomes. GenBank repeat boundaries are used when available. Other genomes use mismatch-tolerant sequence inference, and each generated CSV records the boundary source. External NCBI test genomes and model-size comparisons should happen only after the local panel evaluation is reviewed.
 """
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(content)

@@ -7,6 +7,7 @@ from Bio import Entrez, SeqIO
 from Bio.SeqFeature import CompoundLocation, FeatureLocation, SeqFeature
 
 from src.biological_eval.config import require_keys
+from src.sliding_eval.regions import RegionMap, region_map_from_repeats
 
 
 Entrez.email = "guhanst9@gmail.com"
@@ -73,6 +74,47 @@ def parse_genbank_features(path: str | Path) -> tuple[str, int, list[FeatureReco
                 )
             )
     return accession, len(record.seq), features
+
+
+def genbank_region_map(path: str | Path) -> RegionMap | None:
+    record = SeqIO.read(str(path), "genbank")
+    repeats = []
+    for feature in record.features:
+        if feature.type != "repeat_region":
+            continue
+        intervals = feature_intervals(feature)
+        if len(intervals) != 1:
+            continue
+        start, end = intervals[0]
+        if end - start < 10000:
+            continue
+        text = " ".join(value for values in feature.qualifiers.values() for value in values).lower()
+        name = "IRA" if "ira" in text else "IRB" if "irb" in text else ""
+        repeats.append((start, end, name))
+
+    if len(repeats) != 2:
+        return None
+    repeats.sort(key=lambda item: item[0])
+    first_start, first_end, first_name = repeats[0]
+    second_start, second_end, second_name = repeats[1]
+    if not first_name and not second_name:
+        first_name, second_name = "IRB", "IRA"
+    elif not first_name:
+        first_name = "IRA" if second_name == "IRB" else "IRB"
+    elif not second_name:
+        second_name = "IRA" if first_name == "IRB" else "IRB"
+    if first_name == second_name:
+        return None
+    return region_map_from_repeats(
+        first_start,
+        first_end,
+        second_start,
+        second_end,
+        len(record.seq),
+        "genbank",
+        first_name,
+        second_name,
+    )
 
 
 def split_circular_interval(start: int, end: int, genome_length: int) -> list[tuple[int, int]]:

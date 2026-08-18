@@ -5,7 +5,7 @@ from .features import run_features
 from .ir import run_ir
 from .reporting import run_figures, run_report
 from .prepare import run_prepare
-from .sliding import run_sliding
+from .sliding import run_relabel, run_sliding
 from .summary import run_summarize
 
 __all__ = [
@@ -15,6 +15,7 @@ __all__ = [
     "run_features",
     "run_ir",
     "run_prepare",
+    "run_relabel",
     "run_sliding",
     "run_summarize",
     "run_topk",
