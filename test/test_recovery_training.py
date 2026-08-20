@@ -24,6 +24,11 @@ def test_recovery_probability_schedule():
     immediate = replace(preset, recovery_warmup_epochs=0)
     assert recovery_probability_for_epoch(0, immediate) == 0.10
 
+    block_preset = PRESETS["full-recovery"]
+    assert recovery_probability_for_epoch(0, block_preset) == 0.10
+    assert abs(recovery_probability_for_epoch(2, block_preset) - 0.15) < 1e-9
+    assert recovery_probability_for_epoch(4, block_preset) == 0.20
+
 
 def test_recovery_corruption_uses_previous_logit():
     torch.manual_seed(0)
