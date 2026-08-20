@@ -161,74 +161,88 @@ class DnaWindowDataset(Dataset):
         self.prefix_max_fraction = prefix_max_fraction
         self.prediction_unit = normalize_prediction_unit(prediction_unit)
         self.triplet_codec = triplet_codec or TripletCodec()
+        self.records = records
+        self.max_windows = max_windows
+        self.windows_per_record = windows_per_record
         self.windows: list[Window] = []
         self.first_header = ""
         self.first_sequence = ""
+
+        for header, normalized in records:
+            if normalized:
+                self.first_header = header
+                self.first_sequence = normalized
+                break
+        self.resample(seed)
+
+    def resample(self, seed: int) -> None:
+        self.windows = []
         rng = random.Random(seed)
 
         records_seen = 0
-        for header, normalized in records:
+        for _, normalized in self.records:
             if not normalized:
                 continue
-            if not self.first_sequence:
-                self.first_header = header
-                self.first_sequence = normalized
-            encoded = tokenizer.encode(normalized)
-            if windows_per_record is None:
-                self._add_windows(encoded, max_windows)
+            if self.windows_per_record is None:
+                self._add_windows(normalized, self.max_windows)
             else:
-                self._sample_windows(encoded, windows_per_record, rng, max_windows)
+                self._sample_windows(
+                    normalized,
+                    self.windows_per_record,
+                    rng,
+                    self.max_windows,
+                )
             records_seen += 1
             if records_seen % 1000 == 0:
                 print(
                     f"  Loaded {records_seen:,} records, collected {len(self.windows):,} windows...",
                     flush=True,
                 )
-            if max_windows is not None and len(self.windows) >= max_windows:
+            if self.max_windows is not None and len(self.windows) >= self.max_windows:
                 break
 
         if not self.windows:
-            raise ValueError(f"No DNA windows were loaded from {fasta_file}")
+            raise ValueError(f"No DNA windows were loaded from {self.fasta_file}")
 
         rng.shuffle(self.windows)
 
-    def _add_windows(self, encoded: list[int], max_windows: Optional[int]) -> None:
+    def _add_windows(self, sequence: str, max_windows: Optional[int]) -> None:
         internal_window_len = self.l_max
         final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
         minimum_length = 3 if self.prediction_unit == "base" else 4
-        for start in range(0, len(encoded), self.stride):
-            remaining = len(encoded) - start
+        for start in range(0, len(sequence), self.stride):
+            remaining = len(sequence) - start
             reaches_end = remaining <= final_window_len
             chunk_len = final_window_len if reaches_end else internal_window_len
-            chunk = encoded[start : start + chunk_len]
+            chunk = self.tokenizer.encode(sequence[start : start + chunk_len])
             if len(chunk) < minimum_length:
                 continue
-            ends_sequence = start + len(chunk) >= len(encoded)
+            ends_sequence = start + len(chunk) >= len(sequence)
             self.windows.append(Window(tokens=chunk, ends_sequence=ends_sequence))
             if max_windows is not None and len(self.windows) >= max_windows:
                 return
 
     def _sample_windows(
         self,
-        encoded: list[int],
+        sequence: str,
         windows_per_record: int,
         rng: random.Random,
         max_windows: Optional[int],
     ) -> None:
         if windows_per_record <= 0:
             raise ValueError("windows_per_record must be positive")
-        starts = list(range(0, len(encoded), self.stride))
+        starts = list(range(0, len(sequence), self.stride))
         rng.shuffle(starts)
         final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
         minimum_length = 3 if self.prediction_unit == "base" else 4
         for start in starts[:windows_per_record]:
-            remaining = len(encoded) - start
+            remaining = len(sequence) - start
             reaches_end = remaining <= final_window_len
             chunk_len = final_window_len if reaches_end else self.l_max
-            chunk = encoded[start : start + chunk_len]
+            chunk = self.tokenizer.encode(sequence[start : start + chunk_len])
             if len(chunk) < minimum_length:
                 continue
-            ends_sequence = start + len(chunk) >= len(encoded)
+            ends_sequence = start + len(chunk) >= len(sequence)
             self.windows.append(Window(tokens=chunk, ends_sequence=ends_sequence))
             if max_windows is not None and len(self.windows) >= max_windows:
                 return

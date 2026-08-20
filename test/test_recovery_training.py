@@ -84,8 +84,37 @@ def test_recovery_ignores_prompt_and_special_tokens():
     assert corrupted.tolist() == input_ids.tolist()
 
 
+def test_contiguous_recovery_corrupts_connected_history():
+    tokenizer = DnaTokenizer(include_n=False)
+    input_ids = torch.tensor([[3, 3, 3, 3, 3, 3, 3, 3, 3, 3]])
+    attention_mask = torch.ones_like(input_ids)
+    loss_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1, 1, 1, 0]])
+    logits = torch.full((1, 10, tokenizer.vocab_size), -10.0)
+    logits[..., tokenizer.vocab["C"]] = 10.0
+
+    torch.manual_seed(13)
+    corrupted, recovery_mask, changed_count, eligible_count = build_recovery_batch(
+        input_ids,
+        attention_mask,
+        loss_mask,
+        logits,
+        tokenizer,
+        corruption_probability=1.0,
+        corruption_mode="contiguous",
+        block_min_length=4,
+        block_max_length=4,
+    )
+
+    changed = torch.nonzero(corrupted[0] != input_ids[0], as_tuple=False).flatten().tolist()
+    assert changed_count == 8
+    assert eligible_count == 8
+    assert changed == list(range(2, 10))
+    assert recovery_mask[0, changed[0] :9].all()
+
+
 if __name__ == "__main__":
     test_recovery_probability_schedule()
     test_recovery_corruption_uses_previous_logit()
     test_recovery_ignores_prompt_and_special_tokens()
+    test_contiguous_recovery_corrupts_connected_history()
     print("Recovery training tests passed.")

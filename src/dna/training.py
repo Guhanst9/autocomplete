@@ -46,6 +46,10 @@ class TrainingPreset:
     recovery_start_probability: float = 0.02
     recovery_max_probability: float = 0.10
     recovery_warmup_epochs: int = 2
+    recovery_corruption_mode: str = "independent"
+    recovery_block_min_length: int = 4
+    recovery_block_max_length: int = 16
+    resample_train_windows: bool = False
     free_eval_windows: int = 32
     free_eval_prompt_length: int = 512
     free_eval_generate_length: int = 128
@@ -121,6 +125,28 @@ PRESETS = {
         seed=13,
         recovery_enabled=True,
     ),
+    "full-recovery": TrainingPreset(
+        name="full-recovery",
+        d_model=400,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=6,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_start_probability=0.05,
+        recovery_max_probability=0.20,
+        recovery_warmup_epochs=4,
+        recovery_corruption_mode="contiguous",
+        resample_train_windows=True,
+        stride=256,
+    ),
 }
 
 
@@ -179,6 +205,30 @@ TRANSFORMER_PRESETS = {
         dropout=0.1,
         seed=13,
         recovery_enabled=True,
+        n_heads=6,
+        ffn_dim=1600,
+    ),
+    "full-recovery": TrainingPreset(
+        name="full-recovery",
+        d_model=384,
+        d_state=0,
+        n_layers=9,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=6,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_start_probability=0.05,
+        recovery_max_probability=0.20,
+        recovery_warmup_epochs=4,
+        recovery_corruption_mode="contiguous",
+        resample_train_windows=True,
+        stride=256,
         n_heads=6,
         ffn_dim=1600,
     ),
@@ -402,6 +452,9 @@ def build_recovery_batch(
     corruption_probability: float,
     prediction_unit: str = "base",
     triplet_codec: Optional[TripletCodec] = None,
+    corruption_mode: str = "independent",
+    block_min_length: int = 4,
+    block_max_length: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     if corruption_probability <= 0:
         empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
@@ -418,8 +471,30 @@ def build_recovery_batch(
     suffix_token_mask[:, 1:] = loss_mask[:, :-1].bool()
     eligible = is_base & attention_mask.bool() & suffix_token_mask
 
-    random_mask = torch.rand(input_ids.shape, device=input_ids.device) < corruption_probability
-    selected = eligible & random_mask
+    if corruption_mode == "independent":
+        random_mask = torch.rand(input_ids.shape, device=input_ids.device) < corruption_probability
+        selected = eligible & random_mask
+    elif corruption_mode == "contiguous":
+        if block_min_length <= 0 or block_max_length < block_min_length:
+            raise ValueError("recovery block lengths must satisfy 0 < min <= max")
+        selected = torch.zeros_like(eligible)
+        mean_block_length = (block_min_length + block_max_length) / 2
+        start_probability = 1.0 - (1.0 - corruption_probability) ** (1.0 / mean_block_length)
+        starts = eligible & (torch.rand(input_ids.shape, device=input_ids.device) < start_probability)
+        lengths = torch.randint(
+            block_min_length,
+            block_max_length + 1,
+            input_ids.shape,
+            device=input_ids.device,
+        )
+        for offset in range(block_max_length):
+            if offset == 0:
+                selected |= starts
+            else:
+                selected[:, offset:] |= starts[:, :-offset] & (lengths[:, :-offset] > offset)
+        selected &= eligible
+    else:
+        raise ValueError(f"unsupported recovery corruption mode: {corruption_mode}")
     if not selected.any().item():
         empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
         return input_ids, empty_mask, 0, int(eligible.sum().item())
@@ -516,6 +591,9 @@ def train_one_epoch(
                 recovery_probability,
                 prediction_unit,
                 triplet_codec,
+                preset.recovery_corruption_mode,
+                preset.recovery_block_min_length,
+                preset.recovery_block_max_length,
             )
             corrupted_tokens += changed_count
             eligible_recovery_tokens += eligible_count
@@ -853,6 +931,10 @@ def _model_config(
         "recovery_start_probability": preset.recovery_start_probability,
         "recovery_max_probability": preset.recovery_max_probability,
         "recovery_warmup_epochs": preset.recovery_warmup_epochs,
+        "recovery_corruption_mode": preset.recovery_corruption_mode,
+        "recovery_block_min_length": preset.recovery_block_min_length,
+        "recovery_block_max_length": preset.recovery_block_max_length,
+        "resample_train_windows": preset.resample_train_windows,
     }
     if model_type == "transformer":
         shared.update(
@@ -1011,6 +1093,8 @@ def run_training(
     print(f"  Epochs this run: {epochs_this_run}")
     print(f"  Epoch range: {start_epoch}-{start_epoch + epochs_this_run - 1}")
     print(f"  Recovery enabled: {'yes' if preset.recovery_enabled else 'no'}")
+    print(f"  Recovery corruption: {preset.recovery_corruption_mode}")
+    print(f"  Resample train windows each epoch: {'yes' if preset.resample_train_windows else 'no'}")
     print(f"  Homopolymer loss weight: {preset.homopolymer_loss_weight}")
     print(f"  Homopolymer minimum run: {preset.homopolymer_min_run}")
     print(f"  Free eval windows: {preset.free_eval_windows}")
@@ -1025,6 +1109,13 @@ def run_training(
 
     os.makedirs(output_dir, exist_ok=True)
     for epoch in range(start_epoch, start_epoch + epochs_this_run):
+        if preset.resample_train_windows:
+            train_dataset.resample(preset.seed + epoch)
+            data_fingerprints["train_windows"] = window_fingerprint(train_dataset)
+            print(
+                f"Epoch {epoch} sampled {len(train_dataset):,} training windows "
+                f"with seed {preset.seed + epoch}"
+            )
         train_epoch_metrics = train_one_epoch(
             model,
             train_loader,
@@ -1086,6 +1177,9 @@ def run_training(
                 "max_probability": preset.recovery_max_probability,
                 "warmup_epochs": preset.recovery_warmup_epochs,
                 "current_probability": train_epoch_metrics["recovery_probability"],
+                "corruption_mode": preset.recovery_corruption_mode,
+                "block_min_length": preset.recovery_block_min_length,
+                "block_max_length": preset.recovery_block_max_length,
             },
             "tokenizer_vocab": tokenizer.vocab,
             "output_vocab": triplet_codec.triplets if triplet_codec is not None else None,
