@@ -13,6 +13,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fasta-file", default=DEFAULT_FASTA)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--max-additional-epochs", type=int, default=None)
+    parser.add_argument("--early-stopping-patience", type=int, default=None)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--holdout-accession", default=DEFAULT_HOLDOUT)
     parser.add_argument(
         "--prediction-unit",
@@ -31,6 +34,9 @@ def main() -> None:
         resume=args.resume,
         holdout_accession=args.holdout_accession,
         prediction_unit=args.prediction_unit,
+        max_additional_epochs=args.max_additional_epochs,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
 
 

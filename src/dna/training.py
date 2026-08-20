@@ -875,6 +875,17 @@ def _model_config(
     return shared
 
 
+def early_stopping_step(
+    reference_val_loss: float,
+    consecutive_failures: int,
+    current_val_loss: float,
+    min_delta: float,
+) -> tuple[float, int]:
+    if reference_val_loss - current_val_loss >= min_delta:
+        return current_val_loss, 0
+    return reference_val_loss, consecutive_failures + 1
+
+
 def run_training(
     preset_name: str,
     fasta_file: str,
@@ -883,7 +894,16 @@ def run_training(
     holdout_accession: str,
     model_type: str = "s4d",
     prediction_unit: str = "base",
+    max_additional_epochs: Optional[int] = None,
+    early_stopping_patience: Optional[int] = None,
+    early_stopping_min_delta: float = 0.0,
 ) -> None:
+    if max_additional_epochs is not None and max_additional_epochs <= 0:
+        raise ValueError("max_additional_epochs must be positive")
+    if early_stopping_patience is not None and early_stopping_patience <= 0:
+        raise ValueError("early_stopping_patience must be positive")
+    if early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta must be non-negative")
     prediction_unit = normalize_prediction_unit(prediction_unit)
     preset_options = TRANSFORMER_PRESETS if model_type == "transformer" else PRESETS
     if model_type not in {"s4d", "transformer"}:
@@ -960,6 +980,11 @@ def run_training(
         best_val = ckpt.get("best_val_loss", best_val)
         best_quality = ckpt.get("best_quality_score", ckpt.get("quality_score", best_quality))
 
+    epochs_this_run = preset.epochs if max_additional_epochs is None else max_additional_epochs
+    early_stopping_best = best_val
+    early_stopping_failures = 0
+    stopping_reason = f"maximum {epochs_this_run} additional epochs completed"
+
     print(f"DNA {model_type.upper()} run")
     print(f"  Device: {device}")
     print(f"  Preset: {preset.name}")
@@ -983,18 +1008,23 @@ def run_training(
         )
         print("  Model variant: s4d_v2")
     print(f"  Parameters: {parameter_count(model):,}")
-    print(f"  Epochs this run: {preset.epochs}")
-    print(f"  Epoch range: {start_epoch}-{start_epoch + preset.epochs - 1}")
+    print(f"  Epochs this run: {epochs_this_run}")
+    print(f"  Epoch range: {start_epoch}-{start_epoch + epochs_this_run - 1}")
     print(f"  Recovery enabled: {'yes' if preset.recovery_enabled else 'no'}")
     print(f"  Homopolymer loss weight: {preset.homopolymer_loss_weight}")
     print(f"  Homopolymer minimum run: {preset.homopolymer_min_run}")
     print(f"  Free eval windows: {preset.free_eval_windows}")
     if resume:
         print(f"  Resume: {resume} starting at epoch {start_epoch}")
+    if early_stopping_patience is not None:
+        print(
+            f"  Early stopping: patience={early_stopping_patience}, "
+            f"min_delta={early_stopping_min_delta:.6f}, baseline={early_stopping_best:.6f}"
+        )
     print()
 
     os.makedirs(output_dir, exist_ok=True)
-    for epoch in range(start_epoch, start_epoch + preset.epochs):
+    for epoch in range(start_epoch, start_epoch + epochs_this_run):
         train_epoch_metrics = train_one_epoch(
             model,
             train_loader,
@@ -1002,7 +1032,7 @@ def run_training(
             device,
             preset,
             tokenizer,
-            epoch - start_epoch,
+            epoch,
             prediction_unit,
             triplet_codec,
         )
@@ -1019,6 +1049,13 @@ def run_training(
         )
         is_best = metrics["loss"] < best_val
         best_val = min(best_val, metrics["loss"])
+        if early_stopping_patience is not None:
+            early_stopping_best, early_stopping_failures = early_stopping_step(
+                early_stopping_best,
+                early_stopping_failures,
+                metrics["loss"],
+                early_stopping_min_delta,
+            )
         save = {
             "model_state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
@@ -1034,6 +1071,13 @@ def run_training(
             "data_fingerprints": data_fingerprints,
             "best_val_loss": best_val,
             "best_quality_score": max(best_quality, free_metrics["quality_score"]),
+            "early_stopping": {
+                "enabled": early_stopping_patience is not None,
+                "patience": early_stopping_patience,
+                "min_delta": early_stopping_min_delta,
+                "reference_val_loss": early_stopping_best,
+                "consecutive_failures": early_stopping_failures,
+            },
             "free_generation_metrics": free_metrics,
             "recovery_settings": {
                 "enabled": preset.recovery_enabled,
@@ -1086,6 +1130,20 @@ def run_training(
             f"hpoly_loss={train_epoch_metrics['homopolymer_loss']:.4f} "
             f"hpoly_positions={train_epoch_metrics['homopolymer_positions']}"
         )
+        if early_stopping_patience is not None:
+            print(
+                f"Early stopping status: reference_val_loss={early_stopping_best:.6f} "
+                f"consecutive_failures={early_stopping_failures}/{early_stopping_patience}"
+            )
+            if early_stopping_failures >= early_stopping_patience:
+                stopping_reason = (
+                    f"validation loss failed to improve by at least "
+                    f"{early_stopping_min_delta:.6f} for "
+                    f"{early_stopping_failures} consecutive epochs"
+                )
+                print(f"Early stopping triggered: {stopping_reason}")
+                break
 
     print()
+    print(f"Stopping reason: {stopping_reason}")
     print("Saved:", os.path.join(output_dir, "best_loss.pt"))
