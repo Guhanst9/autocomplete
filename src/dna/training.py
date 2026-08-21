@@ -2,8 +2,9 @@ import hashlib
 import math
 import os
 import random
+import time
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Optional
 
 import torch
@@ -49,6 +50,8 @@ class TrainingPreset:
     recovery_corruption_mode: str = "independent"
     recovery_block_min_length: int = 4
     recovery_block_max_length: int = 16
+    recursive_recovery_batch_fraction: float = 0.25
+    recursive_recovery_block_length: int = 24
     resample_train_windows: bool = False
     free_eval_windows: int = 32
     free_eval_prompt_length: int = 512
@@ -144,6 +147,103 @@ PRESETS = {
         recovery_max_probability=0.20,
         recovery_warmup_epochs=4,
         recovery_corruption_mode="contiguous",
+        resample_train_windows=True,
+        stride=256,
+    ),
+    "size-small": TrainingPreset(
+        name="size-small",
+        d_model=196,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=20,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="independent",
+        resample_train_windows=True,
+        stride=256,
+    ),
+    "size-current": TrainingPreset(
+        name="size-current",
+        d_model=400,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=20,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="independent",
+        resample_train_windows=True,
+        stride=256,
+    ),
+    "size-large": TrainingPreset(
+        name="size-large",
+        d_model=512,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=20,
+        batch_size=2,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="independent",
+        resample_train_windows=True,
+        stride=256,
+    ),
+    "recursive-pilot-24": TrainingPreset(
+        name="recursive-pilot-24",
+        d_model=400,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=1,
+        batch_size=8,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="recursive-block",
+        recursive_recovery_block_length=24,
+        resample_train_windows=True,
+        stride=256,
+    ),
+    "recursive-pilot-48": TrainingPreset(
+        name="recursive-pilot-48",
+        d_model=400,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=1,
+        batch_size=8,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="recursive-block",
+        recursive_recovery_block_length=48,
         resample_train_windows=True,
         stride=256,
     ),
@@ -524,6 +624,73 @@ def build_recovery_batch(
     return corrupted_ids, recovery_mask, int(changed.sum().item()), int(eligible.sum().item())
 
 
+def build_recursive_recovery_batch(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    loss_mask: torch.Tensor,
+    tokenizer: DnaTokenizer,
+    block_length: int,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    if block_length <= 0:
+        raise ValueError("recursive recovery block length must be positive")
+
+    base_token_ids = torch.tensor(
+        [tokenizer.vocab[base] for base in "ACGT"],
+        device=input_ids.device,
+        dtype=input_ids.dtype,
+    )
+    is_base = (input_ids.unsqueeze(-1) == base_token_ids).any(dim=-1)
+    suffix_token_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+    suffix_token_mask[:, 1:] = loss_mask[:, :-1].bool()
+    eligible = is_base & attention_mask.bool() & suffix_token_mask
+    if input_ids.size(1) < block_length:
+        empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        return input_ids, empty_mask, 0, int(eligible.sum().item())
+
+    common_eligible = eligible.all(dim=0)
+    valid_starts = torch.nonzero(
+        common_eligible.unfold(0, block_length, 1).all(dim=1),
+        as_tuple=False,
+    ).flatten()
+    if valid_starts.numel() == 0:
+        empty_mask = torch.zeros_like(loss_mask, dtype=torch.bool)
+        return input_ids, empty_mask, 0, int(eligible.sum().item())
+
+    selected_index = torch.randint(valid_starts.numel(), (1,), device=input_ids.device)
+    block_start = int(valid_starts[selected_index].item())
+    if block_start == 0:
+        raise ValueError("recursive recovery requires at least one context base")
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            prefix = input_ids[:, :block_start]
+            generated = generate_bases(
+                model,
+                tokenizer,
+                prefix,
+                max_new_bases=block_length,
+                sampling_temperature=None,
+            )[:, block_start : block_start + block_length]
+    finally:
+        if was_training:
+            model.train()
+
+    allowed = (generated.unsqueeze(-1) == base_token_ids).any(dim=-1)
+    if not allowed.all().item():
+        raise ValueError("recursive recovery generated a non-DNA token")
+
+    corrupted_ids = input_ids.clone()
+    block_end = block_start + block_length
+    corrupted_ids[:, block_start:block_end] = generated.detach()
+    changed = corrupted_ids != input_ids
+    history_has_corruption = changed.long().cumsum(dim=1).bool()
+    recovery_mask = loss_mask.bool() & history_has_corruption
+    return corrupted_ids, recovery_mask, int(changed.sum().item()), int(eligible.sum().item())
+
+
 def masked_autocomplete_loss(
     model: S4SequenceModel,
     logits: torch.Tensor,
@@ -563,6 +730,7 @@ def train_one_epoch(
     homopolymer_batches = 0
     homopolymer_positions = 0
     recovery_batches = 0
+    recursive_recovery_batches = 0
     corrupted_tokens = 0
     eligible_recovery_tokens = 0
     base_token_ids = {tokenizer.vocab[base] for base in "ACGT"}
@@ -582,19 +750,41 @@ def train_one_epoch(
         loss = clean_loss
         recovery_loss = logits.sum() * 0.0
         if preset.recovery_enabled:
-            corrupted_ids, recovery_mask, changed_count, eligible_count = build_recovery_batch(
-                input_ids,
-                attention_mask,
-                loss_mask,
-                logits,
-                tokenizer,
-                recovery_probability,
-                prediction_unit,
-                triplet_codec,
-                preset.recovery_corruption_mode,
-                preset.recovery_block_min_length,
-                preset.recovery_block_max_length,
+            use_recursive = (
+                preset.recovery_corruption_mode == "recursive-block"
+                and random.random() < preset.recursive_recovery_batch_fraction
             )
+            if use_recursive:
+                corrupted_ids, recovery_mask, changed_count, eligible_count = (
+                    build_recursive_recovery_batch(
+                        model,
+                        input_ids,
+                        attention_mask,
+                        loss_mask,
+                        tokenizer,
+                        preset.recursive_recovery_block_length,
+                    )
+                )
+                recursive_recovery_batches += 1
+            else:
+                fallback_mode = (
+                    "independent"
+                    if preset.recovery_corruption_mode == "recursive-block"
+                    else preset.recovery_corruption_mode
+                )
+                corrupted_ids, recovery_mask, changed_count, eligible_count = build_recovery_batch(
+                    input_ids,
+                    attention_mask,
+                    loss_mask,
+                    logits,
+                    tokenizer,
+                    recovery_probability,
+                    prediction_unit,
+                    triplet_codec,
+                    fallback_mode,
+                    preset.recovery_block_min_length,
+                    preset.recovery_block_max_length,
+                )
             corrupted_tokens += changed_count
             eligible_recovery_tokens += eligible_count
             if recovery_mask.any().item():
@@ -638,6 +828,7 @@ def train_one_epoch(
         "recovery_loss": total_recovery_loss / max(1, len(loader)),
         "recovery_probability": recovery_probability,
         "recovery_batches": recovery_batches,
+        "recursive_recovery_batches": recursive_recovery_batches,
         "corrupted_token_fraction": corrupted_tokens / max(1, eligible_recovery_tokens),
         "homopolymer_loss": total_homopolymer_loss / max(1, homopolymer_batches),
         "homopolymer_positions": homopolymer_positions,
@@ -934,6 +1125,8 @@ def _model_config(
         "recovery_corruption_mode": preset.recovery_corruption_mode,
         "recovery_block_min_length": preset.recovery_block_min_length,
         "recovery_block_max_length": preset.recovery_block_max_length,
+        "recursive_recovery_batch_fraction": preset.recursive_recovery_batch_fraction,
+        "recursive_recovery_block_length": preset.recursive_recovery_block_length,
         "resample_train_windows": preset.resample_train_windows,
     }
     if model_type == "transformer":
@@ -979,6 +1172,7 @@ def run_training(
     max_additional_epochs: Optional[int] = None,
     early_stopping_patience: Optional[int] = None,
     early_stopping_min_delta: float = 0.0,
+    batch_size: Optional[int] = None,
 ) -> None:
     if max_additional_epochs is not None and max_additional_epochs <= 0:
         raise ValueError("max_additional_epochs must be positive")
@@ -986,11 +1180,19 @@ def run_training(
         raise ValueError("early_stopping_patience must be positive")
     if early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta must be non-negative")
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("batch_size must be positive")
     prediction_unit = normalize_prediction_unit(prediction_unit)
     preset_options = TRANSFORMER_PRESETS if model_type == "transformer" else PRESETS
     if model_type not in {"s4d", "transformer"}:
         raise ValueError("model_type must be 's4d' or 'transformer'")
     preset = preset_options[preset_name]
+    if batch_size is not None:
+        preset = replace(preset, batch_size=batch_size)
+    if not 0.0 <= preset.recursive_recovery_batch_fraction <= 1.0:
+        raise ValueError("recursive recovery batch fraction must be between 0 and 1")
+    if preset.recursive_recovery_block_length <= 0:
+        raise ValueError("recursive recovery block length must be positive")
     random.seed(preset.seed)
     torch.manual_seed(preset.seed)
     device = get_device()
@@ -1090,10 +1292,15 @@ def run_training(
         )
         print("  Model variant: s4d_v2")
     print(f"  Parameters: {parameter_count(model):,}")
+    print(f"  Batch size: {preset.batch_size}")
     print(f"  Epochs this run: {epochs_this_run}")
     print(f"  Epoch range: {start_epoch}-{start_epoch + epochs_this_run - 1}")
     print(f"  Recovery enabled: {'yes' if preset.recovery_enabled else 'no'}")
     print(f"  Recovery corruption: {preset.recovery_corruption_mode}")
+    if preset.recovery_corruption_mode == "recursive-block":
+        fraction = preset.recursive_recovery_batch_fraction
+        print(f"  Recursive recovery batch fraction: {fraction:.2f}")
+        print(f"  Recursive recovery block length: {preset.recursive_recovery_block_length}")
     print(f"  Resample train windows each epoch: {'yes' if preset.resample_train_windows else 'no'}")
     print(f"  Homopolymer loss weight: {preset.homopolymer_loss_weight}")
     print(f"  Homopolymer minimum run: {preset.homopolymer_min_run}")
@@ -1109,6 +1316,7 @@ def run_training(
 
     os.makedirs(output_dir, exist_ok=True)
     for epoch in range(start_epoch, start_epoch + epochs_this_run):
+        epoch_started = time.perf_counter()
         if preset.resample_train_windows:
             train_dataset.resample(preset.seed + epoch)
             data_fingerprints["train_windows"] = window_fingerprint(train_dataset)
@@ -1138,6 +1346,7 @@ def run_training(
             preset.free_eval_prompt_length,
             preset.free_eval_generate_length,
         )
+        epoch_runtime_seconds = time.perf_counter() - epoch_started
         is_best = metrics["loss"] < best_val
         best_val = min(best_val, metrics["loss"])
         if early_stopping_patience is not None:
@@ -1162,6 +1371,7 @@ def run_training(
             "data_fingerprints": data_fingerprints,
             "best_val_loss": best_val,
             "best_quality_score": max(best_quality, free_metrics["quality_score"]),
+            "epoch_runtime_seconds": epoch_runtime_seconds,
             "early_stopping": {
                 "enabled": early_stopping_patience is not None,
                 "patience": early_stopping_patience,
@@ -1180,6 +1390,8 @@ def run_training(
                 "corruption_mode": preset.recovery_corruption_mode,
                 "block_min_length": preset.recovery_block_min_length,
                 "block_max_length": preset.recovery_block_max_length,
+                "recursive_batch_fraction": preset.recursive_recovery_batch_fraction,
+                "recursive_block_length": preset.recursive_recovery_block_length,
             },
             "tokenizer_vocab": tokenizer.vocab,
             "output_vocab": triplet_codec.triplets if triplet_codec is not None else None,
@@ -1209,6 +1421,7 @@ def run_training(
             f"recovery_loss={train_epoch_metrics['recovery_loss']:.4f} "
             f"recovery_p={train_epoch_metrics['recovery_probability']:.3f} "
             f"corrupt_frac={train_epoch_metrics['corrupted_token_fraction']:.4f} "
+            f"recursive_batches={train_epoch_metrics['recursive_recovery_batches']} "
             f"val_loss={metrics['loss']:.4f} "
             f"val_ppl={metrics['perplexity']:.3f} "
             f"base_ppl={metrics['base_normalized_perplexity']:.3f} "
@@ -1222,7 +1435,8 @@ def run_training(
             f"free_runs_gt20={free_metrics['runs_over_20_fraction']:.4f} "
             f"quality_score={free_metrics['quality_score']:.4f} "
             f"hpoly_loss={train_epoch_metrics['homopolymer_loss']:.4f} "
-            f"hpoly_positions={train_epoch_metrics['homopolymer_positions']}"
+            f"hpoly_positions={train_epoch_metrics['homopolymer_positions']} "
+            f"epoch_seconds={epoch_runtime_seconds:.1f}"
         )
         if early_stopping_patience is not None:
             print(
