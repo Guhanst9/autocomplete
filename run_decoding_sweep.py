@@ -5,6 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from src.sliding_eval.fasta import find_record_by_accession
+from src.sliding_eval.windows import default_window_starts
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
@@ -99,6 +102,16 @@ def parse_numbers(value: str, number_type):
     return [number_type(item.strip()) for item in value.split(",") if item.strip()]
 
 
+def evenly_spaced_starts(starts: list[int], count: int) -> list[int]:
+    if count <= 0:
+        raise ValueError("max windows must be positive")
+    if len(starts) <= count:
+        return starts
+    if count == 1:
+        return [starts[0]]
+    return [starts[round(index * (len(starts) - 1) / (count - 1))] for index in range(count)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run matched sampled-decoding evaluations.")
     parser.add_argument("--checkpoint", required=True)
@@ -110,6 +123,7 @@ def main() -> None:
     parser.add_argument("--prompt-length", type=int, default=512)
     parser.add_argument("--generate-length", type=int, default=512)
     parser.add_argument("--stride", type=int, default=256)
+    parser.add_argument("--max-windows", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--summarize-only", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -119,6 +133,19 @@ def main() -> None:
     seeds = parse_numbers(args.seeds, int)
     if not temperatures or not seeds or any(value <= 0 for value in temperatures):
         raise ValueError("temperatures and seeds must be non-empty, with positive temperatures")
+
+    window_starts = None
+    if args.max_windows is not None:
+        record = find_record_by_accession(args.fasta_file, args.accession)
+        all_starts = default_window_starts(
+            record.length,
+            args.prompt_length,
+            args.prompt_length + args.generate_length,
+            args.stride,
+            circular=True,
+        )
+        window_starts = evenly_spaced_starts(all_starts, args.max_windows)
+        print(f"Using {len(window_starts)} evenly spaced windows from {len(all_starts)} total")
 
     results = []
     for temperature in temperatures:
@@ -154,6 +181,8 @@ def main() -> None:
                     "--output_dir",
                     str(run_dir),
                 ]
+                if window_starts is not None:
+                    command.extend(["--window_starts", ",".join(map(str, window_starts))])
                 subprocess.run(command, check=True, cwd=PROJECT_ROOT)
             if not csv_path.exists():
                 raise FileNotFoundError(f"missing sweep result: {csv_path}")

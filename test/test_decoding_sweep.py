@@ -1,6 +1,6 @@
 import csv
 
-from run_decoding_sweep import aggregate, summarize_csv
+from run_decoding_sweep import aggregate, evenly_spaced_starts, summarize_csv
 
 
 def test_sweep_summary(tmp_path):
@@ -23,3 +23,8 @@ def test_sweep_summary(tmp_path):
     combined = aggregate([result, {**result, "seed": 29, "accuracy_percent": 62.5}])
     assert combined[0]["seeds"] == 2
     assert combined[0]["mean_accuracy_percent"] == 75.0
+
+
+def test_evenly_spaced_starts_cover_full_range():
+    assert evenly_spaced_starts(list(range(10)), 4) == [0, 3, 6, 9]
+    assert evenly_spaced_starts([0, 2], 4) == [0, 2]
