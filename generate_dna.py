@@ -7,7 +7,7 @@ from src.dna.checkpoint import load_model
 from src.dna.generation import generate_bases
 
 
-DEFAULT_CHECKPOINT = "outputs/plastid_s4d_v2_recovery_full/best_loss.pt"
+DEFAULT_CHECKPOINT = "outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt"
 
 
 def clean_prompt(sequence: str) -> str:

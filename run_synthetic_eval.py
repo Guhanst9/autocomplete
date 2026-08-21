@@ -8,8 +8,8 @@ from src.sliding_eval.generation import generate_windows, longest_homopolymer_ru
 from src.sliding_eval.windows import SlidingWindow
 
 
-DEFAULT_CHECKPOINT = "outputs/plastid_s4d_v2_recovery_full/best_loss.pt"
-DEFAULT_OUTPUT_DIR = "outputs/synthetic_eval"
+DEFAULT_CHECKPOINT = "outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt"
+DEFAULT_OUTPUT_DIR = "outputs/s4d_base_16.57m_recovery/evaluations/synthetic_controls"
 
 
 @dataclass(frozen=True)

@@ -2,9 +2,9 @@ project: plastid_s4_autocomplete
 purpose: current best plastid dna next-base model settings
 
 checkpoint:
-  best_path: outputs/plastid_full_16m_l1024_strong/best.pt
-  last_path: outputs/plastid_full_16m_l1024_strong/last.pt
-  output_dir: outputs/plastid_full_16m_l1024_strong
+  best_path: outputs/s4d_base_16.69m_legacy/checkpoints/best.pt
+  last_path: null
+  output_dir: outputs/s4d_base_16.69m_legacy/checkpoints
   planned_epochs: 10
   best_saved_epoch: 6
   completed_epochs: 7
@@ -111,7 +111,7 @@ metrics_by_epoch:
 reproduce_command: >-
   /opt/anaconda3/bin/python run_plastid.py
   --fasta_file data/plastid/refseq_full/refseq_plastids_all.fna.gz
-  --output_dir outputs/plastid_full_16m_l1024_strong
+  --output_dir outputs/s4d_base_16.69m_legacy/checkpoints
   --l_max 1024
   --max_records 15234
   --windows_per_record 4

@@ -6,7 +6,7 @@ This report freezes the current S4D plastid checkpoint and studies what it gener
 
 ## Dataset and cleaning
 
-The model uses cleaned plastid FASTA data with high-N records removed and remaining N bases replaced before training. The frozen checkpoint is `outputs/plastid_s4d_v2_recovery_full/best_loss.pt`. `NC_053550.1` is treated as a decoding-development genome because it was used while choosing sampled decoding at temperature `0.8`.
+The model uses cleaned plastid FASTA data with high-N records removed and remaining N bases replaced before training. The frozen checkpoint is `outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt`. `NC_053550.1` is treated as a decoding-development genome because it was used while choosing sampled decoding at temperature `0.8`.
 
 ## Model setup
 
@@ -70,7 +70,7 @@ Teacher-forced top-k comparison:
 | NC_053550.1 | 1280 | 512 | 84.77 | 94.34 | 0.7982 | 29.88 | T |
 | NC_053550.1 | 1536 | 512 | 79.30 | 91.80 | 0.7134 | 32.42 | T |
 
-Full context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
+Full context-length outputs are stored in ignored CSV files under `outputs/s4d_base_16.57m_recovery/evaluations/biological_panel/` because they include generated sequences.
 
 ## Synthetic controls
 

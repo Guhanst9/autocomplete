@@ -1,6 +1,6 @@
 {
   "project": "plastid_s4d_evaluation",
-  "checkpoint": "outputs/plastid_s4d_v2_recovery_full/best_loss.pt",
+  "checkpoint": "outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt",
   "raw_fasta": "data/plastid/refseq_full/refseq_plastids_all.fna.gz",
   "clean_fasta": "data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz",
   "holdout_accession": "NC_053550.1",
@@ -16,8 +16,8 @@
   "repeat_sample_seeds": [13, 29, 47, 71, 101],
   "context_lengths": [128, 256, 512, 1024],
   "baseline_csvs": {
-    "greedy": "outputs/plastid_s4d_v2_recovery_full_rosa_eval_best_loss/NC_053550.1_windows.csv",
-    "sampled_t08_seed13": "outputs/plastid_s4d_v2_recovery_full_rosa_eval_best_loss_sampled_t08_seed13/NC_053550.1_windows.csv"
+    "greedy": "outputs/s4d_base_16.57m_recovery/evaluations/rosa_greedy/NC_053550.1_windows.csv",
+    "sampled_t08_seed13": "outputs/s4d_base_16.57m_recovery/evaluations/rosa_sampled_t08_seed13/NC_053550.1_windows.csv"
   },
   "known_rosa_baseline": {
     "greedy_accuracy_percent": 59.49,

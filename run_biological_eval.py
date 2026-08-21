@@ -13,7 +13,7 @@ from src.biological_eval.summary import run_summarize
 
 
 DEFAULT_CONFIG = "configs/plastid_evaluation.yaml"
-DEFAULT_OUTPUT_DIR = "outputs/plastid_biological_eval"
+DEFAULT_OUTPUT_DIR = "outputs/s4d_base_16.57m_recovery/evaluations/biological_panel"
 
 
 def parse_args() -> argparse.Namespace:

@@ -13,7 +13,7 @@ pip install -r requirements.txt
 Model checkpoints and FASTA files are kept outside Git because they are large. The main checkpoint used for the current experiments is:
 
 ```text
-outputs/plastid_s4d_v2_recovery_full/best_loss.pt
+outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt
 ```
 
 Current checkpoint SHA-256:
@@ -36,7 +36,7 @@ Do not commit model checkpoints or full FASTA files. The full training FASTA is 
 
 ```bash
 python generate_dna.py \
-  --checkpoint outputs/plastid_s4d_v2_recovery_full/best_loss.pt \
+  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
   --prompt ACGTTGCAACGTTGCA \
   --max-new-bases 256 \
   --decoding-mode sampled \
@@ -48,7 +48,7 @@ For a longer prompt, put the sequence in a text or FASTA file:
 
 ```bash
 python generate_dna.py \
-  --checkpoint outputs/plastid_s4d_v2_recovery_full/best_loss.pt \
+  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
   --prompt-file data/prompt.fna \
   --max-new-bases 512
 ```
@@ -61,7 +61,7 @@ Greedy decoding is useful as a stability test because it always takes the highes
 
 ```bash
 python run_sliding_eval.py \
-  --checkpoint outputs/plastid_s4d_v2_recovery_full/best_loss.pt \
+  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
   --fasta_file data/plastid/refseq_full/refseq_plastids_all.fna.gz \
   --accession NC_053550.1 \
   --prompt_length 512 \
@@ -72,7 +72,7 @@ python run_sliding_eval.py \
   --decoding_mode sampled \
   --temperature 0.8 \
   --seed 13 \
-  --output_dir outputs/rosa_eval
+  --output_dir outputs/s4d_base_16.57m_recovery/evaluations/rosa_new
 ```
 
 Important output columns:
@@ -98,7 +98,7 @@ Prepare baseline metadata and the panel manifest:
 python run_biological_eval.py \
   --config configs/plastid_evaluation.yaml \
   --stage prepare \
-  --output-dir outputs/plastid_biological_eval
+  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel
 ```
 
 Download/cache GenBank annotations for the first panel genome:
@@ -107,7 +107,7 @@ Download/cache GenBank annotations for the first panel genome:
 python run_biological_eval.py \
   --config configs/plastid_evaluation.yaml \
   --stage annotations \
-  --output-dir outputs/plastid_biological_eval \
+  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
   --max-genomes 1
 ```
 
@@ -117,7 +117,7 @@ Run a small smoke evaluation:
 python run_biological_eval.py \
   --config configs/plastid_evaluation.yaml \
   --stage sliding \
-  --output-dir outputs/plastid_biological_eval \
+  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
   --max-genomes 1 \
   --max-windows 2 \
   --seeds 13
@@ -129,7 +129,7 @@ Create compact summaries, figures, and the Markdown report:
 python run_biological_eval.py \
   --config configs/plastid_evaluation.yaml \
   --stage summarize \
-  --output-dir outputs/plastid_biological_eval \
+  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
   --reports-dir reports/plastid_eval
 
 python run_biological_eval.py \
@@ -167,7 +167,7 @@ The ignored `tests/` directory is only for temporary experiment outputs and chec
 python run_plastid.py \
   --preset full \
   --fasta-file data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz \
-  --output-dir outputs/plastid_s4d_v2_recovery_full \
+  --output-dir outputs/s4d_base_16.57m_recovery/checkpoints \
   --holdout-accession NC_053550.1
 ```
 

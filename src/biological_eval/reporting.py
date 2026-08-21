@@ -205,7 +205,7 @@ Teacher-forced top-k comparison:
 
 {table_preview(reports / "topk_summary.csv")}
 
-Full context-length outputs are stored in ignored CSV files under `outputs/plastid_biological_eval/` because they include generated sequences.
+Full context-length outputs are stored in ignored CSV files under `outputs/s4d_base_16.57m_recovery/evaluations/biological_panel/` because they include generated sequences.
 
 ## Synthetic controls
 
