@@ -231,10 +231,14 @@ class DnaWindowDataset(Dataset):
     ) -> None:
         if windows_per_record <= 0:
             raise ValueError("windows_per_record must be positive")
-        starts = list(range(0, len(sequence), self.stride))
-        rng.shuffle(starts)
         final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
         minimum_length = 3 if self.prediction_unit == "base" else 4
+        starts = [
+            start
+            for start in range(0, len(sequence), self.stride)
+            if len(sequence) - start >= minimum_length
+        ]
+        rng.shuffle(starts)
         for start in starts[:windows_per_record]:
             remaining = len(sequence) - start
             reaches_end = remaining <= final_window_len

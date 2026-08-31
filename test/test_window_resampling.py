@@ -28,3 +28,21 @@ def test_resampling_is_repeatable_and_changes_windows():
 
     assert first == repeated
     assert first != second
+
+
+def test_resampling_replaces_too_short_end_fragment():
+    for seed in range(20):
+        dataset = DnaWindowDataset(
+            fasta_file="memory.fasta",
+            tokenizer=DnaTokenizer(),
+            l_max=64,
+            stride=64,
+            max_windows=None,
+            windows_per_record=2,
+            prefix_min_fraction=0.25,
+            prefix_max_fraction=0.70,
+            seed=seed,
+            records=[("record", "A" * 130)],
+            prediction_unit="triplet",
+        )
+        assert len(dataset) == 2
