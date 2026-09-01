@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-additional-epochs", type=int, default=None)
     parser.add_argument("--early-stopping-patience", type=int, default=None)
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument("--early-stopping-previous-val-loss", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--holdout-accession", default=DEFAULT_HOLDOUT)
     parser.add_argument(
@@ -38,6 +39,7 @@ def main() -> None:
         max_additional_epochs=args.max_additional_epochs,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
+        early_stopping_previous_val_loss=args.early_stopping_previous_val_loss,
         batch_size=args.batch_size,
     )
 

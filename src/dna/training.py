@@ -56,6 +56,7 @@ class TrainingPreset:
     free_eval_generate_length: int = 128
     n_heads: Optional[int] = None
     ffn_dim: Optional[int] = None
+    filter_short_window_starts: bool = True
 
 
 PRESETS = {
@@ -289,6 +290,28 @@ TRANSFORMER_PRESETS = {
         stride=256,
         n_heads=6,
         ffn_dim=1600,
+    ),
+    "matched-current": TrainingPreset(
+        name="matched-current",
+        d_model=384,
+        d_state=0,
+        n_layers=9,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=4,
+        epochs=50,
+        batch_size=8,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="independent",
+        resample_train_windows=True,
+        stride=256,
+        n_heads=6,
+        ffn_dim=1600,
+        filter_short_window_starts=False,
     ),
 }
 
@@ -946,6 +969,7 @@ def build_datasets(
         records=train_records,
         prediction_unit=prediction_unit,
         triplet_codec=triplet_codec,
+        filter_short_window_starts=preset.filter_short_window_starts,
     )
     val_dataset = DnaWindowDataset(
         fasta_file=fasta_file,
@@ -960,6 +984,7 @@ def build_datasets(
         records=val_records,
         prediction_unit=prediction_unit,
         triplet_codec=triplet_codec,
+        filter_short_window_starts=preset.filter_short_window_starts,
     )
     return train_records, val_records, train_dataset, val_dataset
 
@@ -1016,14 +1041,16 @@ def _model_config(
 
 
 def early_stopping_step(
-    reference_val_loss: float,
-    consecutive_failures: int,
+    previous_val_loss: Optional[float],
+    consecutive_plateau_epochs: int,
     current_val_loss: float,
     min_delta: float,
 ) -> tuple[float, int]:
-    if reference_val_loss - current_val_loss >= min_delta:
+    if previous_val_loss is None:
         return current_val_loss, 0
-    return reference_val_loss, consecutive_failures + 1
+    if previous_val_loss - current_val_loss >= min_delta:
+        return current_val_loss, 0
+    return current_val_loss, consecutive_plateau_epochs + 1
 
 
 def run_training(
@@ -1037,6 +1064,7 @@ def run_training(
     max_additional_epochs: Optional[int] = None,
     early_stopping_patience: Optional[int] = None,
     early_stopping_min_delta: float = 0.0,
+    early_stopping_previous_val_loss: Optional[float] = None,
     batch_size: Optional[int] = None,
 ) -> None:
     if max_additional_epochs is not None and max_additional_epochs <= 0:
@@ -1045,6 +1073,11 @@ def run_training(
         raise ValueError("early_stopping_patience must be positive")
     if early_stopping_min_delta < 0:
         raise ValueError("early_stopping_min_delta must be non-negative")
+    if (
+        early_stopping_previous_val_loss is not None
+        and not math.isfinite(early_stopping_previous_val_loss)
+    ):
+        raise ValueError("early_stopping_previous_val_loss must be finite")
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be positive")
     prediction_unit = normalize_prediction_unit(prediction_unit)
@@ -1126,8 +1159,14 @@ def run_training(
         best_quality = ckpt.get("best_quality_score", ckpt.get("quality_score", best_quality))
 
     epochs_this_run = preset.epochs if max_additional_epochs is None else max_additional_epochs
-    early_stopping_best = best_val
-    early_stopping_failures = 0
+    early_stopping_previous = early_stopping_previous_val_loss
+    if early_stopping_previous is None and resume:
+        early_stopping_previous = resume_checkpoint.get("validation_loss")
+        if early_stopping_previous is None:
+            early_stopping_previous = resume_checkpoint.get("early_stopping", {}).get(
+                "previous_val_loss"
+            )
+    early_stopping_plateau_epochs = 0
     stopping_reason = f"maximum {epochs_this_run} additional epochs completed"
 
     print(f"DNA {model_type.upper()} run")
@@ -1167,7 +1206,8 @@ def run_training(
     if early_stopping_patience is not None:
         print(
             f"  Early stopping: patience={early_stopping_patience}, "
-            f"min_delta={early_stopping_min_delta:.6f}, baseline={early_stopping_best:.6f}"
+            f"min_delta={early_stopping_min_delta:.6f}, "
+            f"previous_val_loss={early_stopping_previous}"
         )
     print()
 
@@ -1207,9 +1247,9 @@ def run_training(
         is_best = metrics["loss"] < best_val
         best_val = min(best_val, metrics["loss"])
         if early_stopping_patience is not None:
-            early_stopping_best, early_stopping_failures = early_stopping_step(
-                early_stopping_best,
-                early_stopping_failures,
+            early_stopping_previous, early_stopping_plateau_epochs = early_stopping_step(
+                early_stopping_previous,
+                early_stopping_plateau_epochs,
                 metrics["loss"],
                 early_stopping_min_delta,
             )
@@ -1227,14 +1267,19 @@ def run_training(
             "holdout_accession": holdout_accession,
             "data_fingerprints": data_fingerprints,
             "best_val_loss": best_val,
+            "validation_loss": metrics["loss"],
             "best_quality_score": max(best_quality, free_metrics["quality_score"]),
             "epoch_runtime_seconds": epoch_runtime_seconds,
             "early_stopping": {
                 "enabled": early_stopping_patience is not None,
                 "patience": early_stopping_patience,
                 "min_delta": early_stopping_min_delta,
-                "reference_val_loss": early_stopping_best,
-                "consecutive_failures": early_stopping_failures,
+                "mode": "adjacent_epoch_minimum_improvement",
+                "previous_val_loss": early_stopping_previous,
+                "consecutive_plateau_epochs": early_stopping_plateau_epochs,
+                # Compatibility aliases for older artifact readers.
+                "reference_val_loss": early_stopping_previous,
+                "consecutive_failures": early_stopping_plateau_epochs,
             },
             "free_generation_metrics": free_metrics,
             "recovery_settings": {
@@ -1294,14 +1339,15 @@ def run_training(
         )
         if early_stopping_patience is not None:
             print(
-                f"Early stopping status: reference_val_loss={early_stopping_best:.6f} "
-                f"consecutive_failures={early_stopping_failures}/{early_stopping_patience}"
+                f"Early stopping status: previous_val_loss={early_stopping_previous:.6f} "
+                f"consecutive_plateau_epochs={early_stopping_plateau_epochs}/"
+                f"{early_stopping_patience}"
             )
-            if early_stopping_failures >= early_stopping_patience:
+            if early_stopping_plateau_epochs >= early_stopping_patience:
                 stopping_reason = (
-                    f"validation loss failed to improve by at least "
+                    f"validation loss did not improve by at least "
                     f"{early_stopping_min_delta:.6f} for "
-                    f"{early_stopping_failures} consecutive epochs"
+                    f"{early_stopping_plateau_epochs} consecutive epochs"
                 )
                 print(f"Early stopping triggered: {stopping_reason}")
                 break

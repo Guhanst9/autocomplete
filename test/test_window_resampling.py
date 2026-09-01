@@ -46,3 +46,26 @@ def test_resampling_replaces_too_short_end_fragment():
             prediction_unit="triplet",
         )
         assert len(dataset) == 2
+
+
+def test_legacy_resampling_can_reproduce_historical_window_fingerprints():
+    counts = []
+    for seed in range(20):
+        dataset = DnaWindowDataset(
+            fasta_file="memory.fasta",
+            tokenizer=DnaTokenizer(),
+            l_max=64,
+            stride=64,
+            max_windows=None,
+            windows_per_record=2,
+            prefix_min_fraction=0.25,
+            prefix_max_fraction=0.70,
+            seed=seed,
+            records=[("record", "A" * 130)],
+            prediction_unit="triplet",
+            filter_short_window_starts=False,
+        )
+        counts.append(len(dataset))
+
+    assert 1 in counts
+    assert 2 in counts

@@ -147,6 +147,7 @@ class DnaWindowDataset(Dataset):
         records: list[tuple[str, str]],
         prediction_unit: str = "base",
         triplet_codec: Optional[TripletCodec] = None,
+        filter_short_window_starts: bool = True,
     ):
         if l_max < 4:
             raise ValueError("l_max must be at least 4")
@@ -164,6 +165,7 @@ class DnaWindowDataset(Dataset):
         self.records = records
         self.max_windows = max_windows
         self.windows_per_record = windows_per_record
+        self.filter_short_window_starts = filter_short_window_starts
         self.windows: list[Window] = []
         self.first_header = ""
         self.first_sequence = ""
@@ -233,11 +235,13 @@ class DnaWindowDataset(Dataset):
             raise ValueError("windows_per_record must be positive")
         final_window_len = self.l_max - 1 if self.prediction_unit == "base" else self.l_max
         minimum_length = 3 if self.prediction_unit == "base" else 4
-        starts = [
-            start
-            for start in range(0, len(sequence), self.stride)
-            if len(sequence) - start >= minimum_length
-        ]
+        starts = list(range(0, len(sequence), self.stride))
+        if self.filter_short_window_starts:
+            starts = [
+                start
+                for start in starts
+                if len(sequence) - start >= minimum_length
+            ]
         rng.shuffle(starts)
         for start in starts[:windows_per_record]:
             remaining = len(sequence) - start

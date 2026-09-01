@@ -2,6 +2,7 @@ import _path  # noqa: F401
 
 import io
 import os
+import sys
 from unittest.mock import patch
 
 import torch
@@ -11,6 +12,7 @@ from src.dna.data import DnaTokenizer, DnaWindowDataset
 from src.dna.training import TRANSFORMER_PRESETS, build_sequence_model, parameter_count
 from src.models.s4_model import S4SequenceModel
 from src.models.transformer_model import TransformerSequenceModel
+from run_transformer import parse_args
 
 
 def tiny_model() -> TransformerSequenceModel:
@@ -121,6 +123,71 @@ def test_full_parameter_count():
             model_type="transformer",
         )
     assert parameter_count(model) == 16_416_576
+
+
+def test_matched_current_preset_and_triplet_parameter_count():
+    preset = TRANSFORMER_PRESETS["matched-current"]
+    assert preset.d_model == 384
+    assert preset.n_heads == 6
+    assert preset.ffn_dim == 1600
+    assert preset.n_layers == 9
+    assert preset.l_max == 1024
+    assert preset.max_windows == 60_000
+    assert preset.windows_per_record == 4
+    assert preset.batch_size == 8
+    assert preset.lr == 3e-4
+    assert preset.dropout == 0.1
+    assert preset.seed == 13
+    assert preset.stride == 256
+    assert preset.resample_train_windows is True
+    assert preset.recovery_enabled is True
+    assert preset.recovery_corruption_mode == "independent"
+    assert preset.recovery_start_probability == 0.02
+    assert preset.recovery_max_probability == 0.10
+    assert preset.recovery_loss_weight == 0.25
+    assert preset.homopolymer_loss_weight == 0.02
+    assert preset.homopolymer_min_run == 8
+    assert preset.filter_short_window_starts is False
+
+    tokenizer = DnaTokenizer()
+    with torch.device("meta"):
+        model = build_sequence_model(
+            tokenizer,
+            preset,
+            model_type="transformer",
+            prediction_unit="triplet",
+        )
+    assert parameter_count(model) == 16_441_152
+
+
+def test_transformer_training_control_arguments():
+    argv = [
+        "run_transformer.py",
+        "--preset",
+        "matched-current",
+        "--output-dir",
+        "outputs/test",
+        "--prediction-unit",
+        "triplet",
+        "--max-additional-epochs",
+        "50",
+        "--early-stopping-patience",
+        "3",
+        "--early-stopping-min-delta",
+        "0.002",
+        "--early-stopping-previous-val-loss",
+        "1.25",
+        "--batch-size",
+        "8",
+    ]
+    with patch.object(sys, "argv", argv):
+        args = parse_args()
+
+    assert args.max_additional_epochs == 50
+    assert args.early_stopping_patience == 3
+    assert args.early_stopping_min_delta == 0.002
+    assert args.early_stopping_previous_val_loss == 1.25
+    assert args.batch_size == 8
 
 
 def test_checkpoint_reload_and_legacy_default():
