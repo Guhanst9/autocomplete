@@ -1,0 +1,14 @@
+{
+  "created_at_utc": "2026-09-01T17:53:48.928745+00:00",
+  "training_fasta": "data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz",
+  "training_fasta_sha256": "6c2505637ec41837687d0d16be9d8cd75a7d84b82573bd883bc2fb6d16a9257d",
+  "training_records_scanned": 15094,
+  "training_genera": 4016,
+  "accepted_records": 20,
+  "rejected_records": 0,
+  "development_accessions": [
+    "NC_053550.1"
+  ],
+  "manifest": "reports/untouched_test_panel.csv",
+  "rejections": "reports/untouched_test_panel_rejections.csv"
+}

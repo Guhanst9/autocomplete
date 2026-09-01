@@ -1,0 +1,29 @@
+training_fasta: data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz
+manifest: reports/untouched_test_panel.csv
+rejections: reports/untouched_test_panel_rejections.csv
+metadata: reports/untouched_test_panel_metadata.json
+download_dir: outputs/untouched_test_panel/downloads
+development_accessions:
+  - NC_053550.1
+accessions:
+  - PZ859214.1
+  - PZ861799.1
+  - PZ856295.1
+  - PZ266851.1
+  - MT124723.1
+  - PZ609856.1
+  - PZ143189.1
+  - PX520838.1
+  - PX365544.1
+  - PX365543.1
+  - PZ839401.1
+  - PZ839392.1
+  - PZ839382.1
+  - PQ213310.1
+  - PQ221181.1
+  - PQ221178.1
+  - PX933086.1
+  - PQ002231.1
+  - PZ389020.1
+  - PZ816511.1
+external_fastas: []
