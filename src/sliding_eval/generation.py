@@ -36,12 +36,13 @@ def generate_windows(
     seed: int,
     decoding_mode: str = "raw_greedy",
     temperature: float = 1.0,
+    model_bundle: tuple | None = None,
 ) -> None:
     if decoding_mode not in {"raw_greedy", "sampled"}:
         raise ValueError("decoding_mode must be 'raw_greedy' or 'sampled'")
     if temperature <= 0:
         raise ValueError("temperature must be positive")
-    model, tokenizer, device = load_model(checkpoint)
+    model, tokenizer, device = model_bundle or load_model(checkpoint)
     torch.manual_seed(seed)
     for start in tqdm(range(0, len(windows), batch_size), desc="Generate"):
         batch = windows[start : start + batch_size]

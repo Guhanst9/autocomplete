@@ -75,6 +75,28 @@ class AnnotationParsingTests(unittest.TestCase):
         self.assertEqual((regions["IRB"].start, regions["IRB"].end), (10000, 22000))
         self.assertEqual((regions["IRA"].start, regions["IRA"].end), (38000, 50000))
 
+    def test_implausible_repeat_regions_are_rejected(self):
+        record = SeqRecord(Seq("A" * 160000), id="TEST.1", name="TEST")
+        record.annotations["molecule_type"] = "DNA"
+        record.features.extend(
+            [
+                SeqFeature(
+                    FeatureLocation(3, 133652),
+                    type="repeat_region",
+                    qualifiers={"note": ["inverted repeat A"]},
+                ),
+                SeqFeature(
+                    FeatureLocation(87865, 114268),
+                    type="repeat_region",
+                    qualifiers={"note": ["inverted repeat B"]},
+                ),
+            ]
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "record.gb"
+            SeqIO.write(record, path, "genbank")
+            self.assertIsNone(genbank_region_map(path))
+
 
 if __name__ == "__main__":
     unittest.main()

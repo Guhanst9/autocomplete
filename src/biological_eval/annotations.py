@@ -1,4 +1,5 @@
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -89,7 +90,9 @@ def genbank_region_map(path: str | Path) -> RegionMap | None:
         if end - start < 10000:
             continue
         text = " ".join(value for values in feature.qualifiers.values() for value in values).lower()
-        name = "IRA" if "ira" in text else "IRB" if "irb" in text else ""
+        is_ira = "ira" in text or bool(re.search(r"\b(?:ir|repeat)\s*a\b", text))
+        is_irb = "irb" in text or bool(re.search(r"\b(?:ir|repeat)\s*b\b", text))
+        name = "IRA" if is_ira else "IRB" if is_irb else ""
         repeats.append((start, end, name))
 
     if len(repeats) != 2:
@@ -97,6 +100,11 @@ def genbank_region_map(path: str | Path) -> RegionMap | None:
     repeats.sort(key=lambda item: item[0])
     first_start, first_end, first_name = repeats[0]
     second_start, second_end, second_name = repeats[1]
+    lengths = [first_end - first_start, second_end - second_start]
+    if max(lengths) > len(record.seq) * 0.4 or min(lengths) / max(lengths) < 0.8:
+        return None
+    if max(first_start, second_start) < min(first_end, second_end):
+        return None
     if not first_name and not second_name:
         first_name, second_name = "IRB", "IRA"
     elif not first_name:

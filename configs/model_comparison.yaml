@@ -1,0 +1,71 @@
+frozen: false
+required_models:
+  - most-common-base
+  - triplet-frequency
+  - markov-1
+  - markov-3
+  - markov-6
+  - s4d-4.13m
+  - s4d-16.60m
+  - s4d-26.98m
+  - transformer-16.44m
+evaluation:
+  prompt_length: 512
+  generation_length: 512
+  stride: 256
+  circular: true
+  decoding_mode: sampled
+  temperature: 0.8
+  seed: 13
+  sampling_seeds: [13, 17, 23]
+  baseline_smoothing: 1.0
+  edge_bases: 100
+  distance_bin_width: 50
+  alignment_scores:
+    match: 2.0
+    mismatch: -1.0
+    gap_open: -2.0
+    gap_extension: -0.5
+  statistical_baseline: markov-6
+  bootstrap_replicates: 10000
+  bootstrap_confidence: 0.95
+  bootstrap_seed: 13
+  batch_size: 8
+  context_lengths: [128, 256, 512, 1024]
+  context_targets_per_genome: 20
+models:
+  - name: most-common-base
+    kind: baseline
+    checkpoint: outputs/baselines/plastid_count_baselines.json.gz
+    method: most-common-base
+  - name: triplet-frequency
+    kind: baseline
+    checkpoint: outputs/baselines/plastid_count_baselines.json.gz
+    method: triplet-frequency
+  - name: markov-1
+    kind: baseline
+    checkpoint: outputs/baselines/plastid_count_baselines.json.gz
+    method: markov
+    order: 1
+  - name: markov-3
+    kind: baseline
+    checkpoint: outputs/baselines/plastid_count_baselines.json.gz
+    method: markov
+    order: 3
+  - name: markov-6
+    kind: baseline
+    checkpoint: outputs/baselines/plastid_count_baselines.json.gz
+    method: markov
+    order: 6
+  - name: s4d-4.13m
+    kind: neural
+    checkpoint: outputs/aws_s4d_triplet_size_small_plateau/best_loss.pt
+  - name: s4d-16.60m
+    kind: neural
+    checkpoint: outputs/aws_s4d_triplet_size_current_epoch50/best_loss.pt
+  - name: s4d-26.98m
+    kind: neural
+    checkpoint: outputs/aws_s4d_triplet_size_large_plateau/best_loss.pt
+  - name: transformer-16.44m
+    kind: neural
+    checkpoint: outputs/aws_transformer_triplet_16.4m_matched/best_loss.pt

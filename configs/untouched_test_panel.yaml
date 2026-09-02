@@ -1,8 +1,36 @@
 training_fasta: data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz
+panel_role: untouched-test
 manifest: reports/untouched_test_panel.csv
+frozen_manifest_sha256: f68e63e65e653f0282b1f114bd1ad0cbd31c197c395ba46733f0c4edfe324222
 rejections: reports/untouched_test_panel_rejections.csv
 metadata: reports/untouched_test_panel_metadata.json
 download_dir: outputs/untouched_test_panel/downloads
+annotation_dir: outputs/untouched_test_panel/annotations
+plant_groups:
+  Rosaceae:
+    - PZ859214.1
+    - MT124723.1
+    - PQ213310.1
+    - PQ221181.1
+    - PQ221178.1
+    - PZ389020.1
+  Asteraceae:
+    - PZ861799.1
+    - PZ609856.1
+    - PZ143189.1
+  Poaceae:
+    - PX520838.1
+    - PX365544.1
+    - PX365543.1
+  other-families:
+    - PZ856295.1
+    - PZ266851.1
+    - PZ839401.1
+    - PZ839392.1
+    - PZ839382.1
+    - PX933086.1
+    - PQ002231.1
+    - PZ816511.1
 development_accessions:
   - NC_053550.1
 accessions:
