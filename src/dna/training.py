@@ -167,6 +167,7 @@ PRESETS = {
         recovery_corruption_mode="independent",
         resample_train_windows=True,
         stride=256,
+        filter_short_window_starts=False,
     ),
     "size-current": TrainingPreset(
         name="size-current",
@@ -186,6 +187,9 @@ PRESETS = {
         recovery_corruption_mode="independent",
         resample_train_windows=True,
         stride=256,
+        # Preserve the original model-size run's window population. The
+        # short-window filter was added after the epoch-37 checkpoint.
+        filter_short_window_starts=False,
     ),
     "size-large": TrainingPreset(
         name="size-large",
@@ -205,6 +209,7 @@ PRESETS = {
         recovery_corruption_mode="independent",
         resample_train_windows=True,
         stride=256,
+        filter_short_window_starts=False,
     ),
 }
 

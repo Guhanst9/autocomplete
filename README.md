@@ -145,6 +145,58 @@ python run_biological_eval.py \
 
 The full generated sequence CSVs stay in ignored `outputs/`. Compact tables and figures are tracked under `reports/`.
 
+## Final model comparison
+
+Fit the count baselines on the same training split used by the neural models:
+
+```bash
+python fit_dna_baselines.py \
+  --fasta-file data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz \
+  --output outputs/baselines/plastid_count_baselines.json.gz \
+  --holdout-accession NC_053550.1 \
+  --validation-fraction 0.1 \
+  --seed 13
+```
+
+Test the baseline code on development data, not the untouched panel:
+
+```bash
+python evaluate_dna_baselines.py \
+  --checkpoint outputs/baselines/plastid_count_baselines.json.gz \
+  --fasta-file data/plastid/refseq_full/refseq_plastids_all.fna.gz \
+  --accession NC_053550.1 \
+  --output-dir outputs/baseline_development \
+  --circular \
+  --development
+```
+
+Before the final test, select the final checkpoint for every model in
+`configs/model_comparison.yaml`. Do not set `frozen: true` until the model list,
+checkpoint selection, and decoding settings are final.
+
+The first command freezes hashes for the test manifest, checkpoints, settings,
+and exact evaluation windows. It does not generate test results:
+
+```bash
+python evaluate_models.py \
+  --test-manifest configs/untouched_test_panel.yaml \
+  --models configs/model_comparison.yaml \
+  --output-dir outputs/final_test \
+  --freeze
+```
+
+After checking the lock, run the comparison once:
+
+```bash
+python evaluate_models.py \
+  --test-manifest configs/untouched_test_panel.yaml \
+  --models configs/model_comparison.yaml \
+  --output-dir outputs/final_test
+```
+
+Interrupted runs resume from validated per-genome CSVs. A completed untouched
+test cannot be rerun from the same output directory.
+
 Model limitations:
 
 ```text

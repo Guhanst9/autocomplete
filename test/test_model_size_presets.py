@@ -32,6 +32,7 @@ def test_size_presets_share_all_training_settings_except_width():
     assert shared["seed"] == 13
     assert shared["stride"] == 256
     assert shared["resample_train_windows"] is True
+    assert shared["filter_short_window_starts"] is False
     assert shared["recovery_enabled"] is True
     assert shared["recovery_corruption_mode"] == "independent"
     assert shared["recovery_start_probability"] == 0.02
