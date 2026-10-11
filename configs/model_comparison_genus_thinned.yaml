@@ -1,0 +1,35 @@
+frozen: true
+required_models:
+  - genus-thinned-s4d-26.98m-best-loss
+  - genus-thinned-s4d-26.98m-best-quality
+evaluation:
+  prompt_length: 512
+  generation_length: 512
+  stride: 256
+  circular: true
+  decoding_mode: sampled
+  temperature: 0.8
+  seed: 13
+  sampling_seeds: [13, 17, 23]
+  baseline_smoothing: 1.0
+  edge_bases: 100
+  distance_bin_width: 50
+  alignment_scores:
+    match: 2.0
+    mismatch: -1.0
+    gap_open: -2.0
+    gap_extension: -0.5
+  statistical_baseline: genus-thinned-s4d-26.98m-best-loss
+  bootstrap_replicates: 10000
+  bootstrap_confidence: 0.95
+  bootstrap_seed: 13
+  batch_size: 8
+  context_lengths: [128, 256, 512, 1024]
+  context_targets_per_genome: 20
+models:
+  - name: genus-thinned-s4d-26.98m-best-loss
+    kind: neural
+    checkpoint: outputs/genus_thinned_s4d_26_98m/final_artifacts/best_loss.pt
+  - name: genus-thinned-s4d-26.98m-best-quality
+    kind: neural
+    checkpoint: outputs/genus_thinned_s4d_26_98m/final_artifacts/best_quality.pt

@@ -22,6 +22,7 @@ env/
 cache/
 outputs/
 /tests/
+/reports/
 
 # fasta and sequence data
 *.fa

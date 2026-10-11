@@ -211,6 +211,26 @@ PRESETS = {
         stride=256,
         filter_short_window_starts=False,
     ),
+    "genus-thinned-large-50": TrainingPreset(
+        name="genus-thinned-large-50",
+        d_model=512,
+        d_state=64,
+        n_layers=10,
+        l_max=1024,
+        max_records=None,
+        max_windows=60000,
+        windows_per_record=16,
+        epochs=50,
+        batch_size=8,
+        lr=3e-4,
+        dropout=0.1,
+        seed=13,
+        recovery_enabled=True,
+        recovery_corruption_mode="independent",
+        resample_train_windows=True,
+        stride=256,
+        filter_short_window_starts=False,
+    ),
 }
 
 

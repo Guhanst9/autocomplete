@@ -1,6 +1,6 @@
-# S4D DNA sequence prediction
+# S4D plastid DNA
 
-This project trains an S4D model to predict the next DNA base in plastid genomes. The active code supports DNA training, direct continuation from a prompt, sliding-window evaluation, and synthetic controls. The earlier protein experiments are preserved under `legacy/protein/`.
+This repository contains code for training and evaluating sequence models on plant plastid DNA. The main experiments compare three S4D model sizes with a parameter-matched Transformer. Models can predict one base or one triplet at a time. Older protein experiments are in `legacy/protein/`.
 
 ## Setup
 
@@ -10,217 +10,43 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Model checkpoints and FASTA files are kept outside Git because they are large. The main checkpoint used for the current experiments is:
+## Data
+
+FASTA files and model checkpoints are not stored in Git. By default, training looks for:
 
 ```text
-outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt
+data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz
 ```
 
-Current checkpoint SHA-256:
+Pass `--fasta-file` to use a different dataset.
 
-```text
-67b2c1f3b73261ea7f30c0e6f746b547286b1715a7c2a1498f6ed54f18db639b
+## Train
+
+Example triplet-prediction run:
+
+```bash
+python run_plastid.py \
+  --preset full-recovery \
+  --prediction-unit triplet \
+  --output-dir outputs/my-triplet-run
 ```
 
-Checkpoint download link:
+The best validation-loss checkpoint is saved as `best_loss.pt` in the output directory.
 
-```text
-https://drive.google.com/file/d/1YhBM-c4PJO7YPhhe2_aPvqxKcC2M3UeJ/view
-```
-
-Do not commit model checkpoints or full FASTA files. The full training FASTA is hundreds of MB and should stay local.
-
-## Generate DNA
-
-`generate_dna.py` accepts any nonempty A/C/G/T prompt and any positive generation limit.
+## Generate a continuation
 
 ```bash
 python generate_dna.py \
-  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
+  --checkpoint outputs/my-triplet-run/best_loss.pt \
   --prompt ACGTTGCAACGTTGCA \
-  --max-new-bases 256 \
+  --max-new-bases 120 \
   --decoding-mode sampled \
   --temperature 0.8 \
   --seed 13
 ```
 
-For a longer prompt, put the sequence in a text or FASTA file:
+Use `--decoding-mode greedy` to choose the most probable output each step.
 
-```bash
-python generate_dna.py \
-  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
-  --prompt-file data/prompt.fna \
-  --max-new-bases 512
-```
+## Evaluation
 
-Use `--decoding-mode greedy` to always choose the most likely next base. Sampled decoding at temperature `0.8` produced fewer repeat collapses in the Rosa evaluation.
-
-Greedy decoding is useful as a stability test because it always takes the highest-probability next base. Sampled decoding at temperature `0.8` adds controlled randomness and removed the long same-base repeat collapse in the Rosa sampled run, while lowering exact accuracy slightly.
-
-## Sliding evaluation
-
-```bash
-python run_sliding_eval.py \
-  --checkpoint outputs/s4d_base_16.57m_recovery/checkpoints/best_loss.pt \
-  --fasta_file data/plastid/refseq_full/refseq_plastids_all.fna.gz \
-  --accession NC_053550.1 \
-  --prompt_length 512 \
-  --generate_length 512 \
-  --stride 256 \
-  --circular \
-  --batch_size 4 \
-  --decoding_mode sampled \
-  --temperature 0.8 \
-  --seed 13 \
-  --output_dir outputs/s4d_base_16.57m_recovery/evaluations/rosa_new
-```
-
-Important output columns:
-
-```text
-prompt             input DNA given to the model
-generated_suffix   model-generated continuation
-true_suffix        real reference continuation
-accuracy_percent   exact base-by-base identity between generated_suffix and true_suffix
-region             inferred chloroplast region label
-longest_generated_run  longest same-base run in generated_suffix
-n_count            number of N bases generated
-gc_difference_percent  absolute GC-content difference from the true suffix
-```
-
-## Biological evaluation
-
-The biological evaluation freezes the current checkpoint and studies its outputs without retraining.
-
-Prepare baseline metadata and the panel manifest:
-
-```bash
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage prepare \
-  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel
-```
-
-Download/cache GenBank annotations for the first panel genome:
-
-```bash
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage annotations \
-  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
-  --max-genomes 1
-```
-
-Run a small smoke evaluation:
-
-```bash
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage sliding \
-  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
-  --max-genomes 1 \
-  --max-windows 2 \
-  --seeds 13
-```
-
-Create compact summaries, figures, and the Markdown report:
-
-```bash
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage summarize \
-  --output-dir outputs/s4d_base_16.57m_recovery/evaluations/biological_panel \
-  --reports-dir reports/plastid_eval
-
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage figures \
-  --reports-dir reports/plastid_eval
-
-python run_biological_eval.py \
-  --config configs/plastid_evaluation.yaml \
-  --stage report \
-  --reports-dir reports/plastid_eval
-```
-
-The full generated sequence CSVs stay in ignored `outputs/`. Compact tables and figures are tracked under `reports/`.
-
-## Final model comparison
-
-Fit the count baselines on the same training split used by the neural models:
-
-```bash
-python fit_dna_baselines.py \
-  --fasta-file data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz \
-  --output outputs/baselines/plastid_count_baselines.json.gz \
-  --holdout-accession NC_053550.1 \
-  --validation-fraction 0.1 \
-  --seed 13
-```
-
-Test the baseline code on development data, not the untouched panel:
-
-```bash
-python evaluate_dna_baselines.py \
-  --checkpoint outputs/baselines/plastid_count_baselines.json.gz \
-  --fasta-file data/plastid/refseq_full/refseq_plastids_all.fna.gz \
-  --accession NC_053550.1 \
-  --output-dir outputs/baseline_development \
-  --circular \
-  --development
-```
-
-Before the final test, select the final checkpoint for every model in
-`configs/model_comparison.yaml`. Do not set `frozen: true` until the model list,
-checkpoint selection, and decoding settings are final.
-
-The first command freezes hashes for the test manifest, checkpoints, settings,
-and exact evaluation windows. It does not generate test results:
-
-```bash
-python evaluate_models.py \
-  --test-manifest configs/untouched_test_panel.yaml \
-  --models configs/model_comparison.yaml \
-  --output-dir outputs/final_test \
-  --freeze
-```
-
-After checking the lock, run the comparison once:
-
-```bash
-python evaluate_models.py \
-  --test-manifest configs/untouched_test_panel.yaml \
-  --models configs/model_comparison.yaml \
-  --output-dir outputs/final_test
-```
-
-Interrupted runs resume from validated per-genome CSVs. A completed untouched
-test cannot be rerun from the same output directory.
-
-Model limitations:
-
-```text
-The model predicts DNA bases from local sequence context. It is not explicitly gene-aware, does not know reading frames during generation, and was trained on 1,024-base windows. Long-range plastome organization should be treated as exploratory.
-```
-
-## Tests
-
-Permanent tests are in `test/`. Run them with:
-
-```bash
-python -m unittest discover -s test -p "test_*.py"
-```
-
-The ignored `tests/` directory is only for temporary experiment outputs and checkpoint smoke runs.
-
-## Train
-
-```bash
-python run_plastid.py \
-  --preset full \
-  --fasta-file data/plastid/refseq_full/refseq_plastids_all_clean_no_n.fna.gz \
-  --output-dir outputs/s4d_base_16.57m_recovery/checkpoints \
-  --holdout-accession NC_053550.1
-```
-
-Available presets are `quick-control`, `quick`, and `full`.
+`prepare_test_panel.py` prepares a test panel. `evaluate_models.py` runs the model comparison, and `run_sliding_eval.py` evaluates a checkpoint on genome windows. Run each script with `--help` for options.
