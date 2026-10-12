@@ -2,7 +2,7 @@ import _path  # noqa: F401
 
 from dataclasses import asdict
 
-from benchmark_model_sizes import select_common_batch
+from scripts.analysis.benchmark_model_sizes import select_common_batch
 from src.dna.data import DnaTokenizer
 from src.dna.training import PRESETS, build_sequence_model, parameter_count
 

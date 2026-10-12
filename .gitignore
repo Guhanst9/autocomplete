@@ -40,3 +40,5 @@ data/**/*.fna.gz
 data/plastid/refseq_full/refseq_plastids_report.csv
 
 AGENTS.md
+*.sh
+/model-size-results.md

@@ -209,7 +209,7 @@ Full context-length outputs are stored in ignored CSV files under `outputs/s4d_b
 
 ## Synthetic controls
 
-Synthetic evaluation remains a separate check through `run_synthetic_eval.py`. It is useful for debugging repeated-base behavior without changing the biological evaluation panel.
+Synthetic evaluation remains a separate check through `scripts/analysis/run_synthetic_eval.py`. It is useful for debugging repeated-base behavior without changing the biological evaluation panel.
 
 ## Limitations and next experiments
 

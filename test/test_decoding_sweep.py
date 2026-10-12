@@ -1,6 +1,6 @@
 import csv
 
-from run_decoding_sweep import aggregate, evenly_spaced_starts, summarize_csv
+from scripts.analysis.run_decoding_sweep import aggregate, evenly_spaced_starts, summarize_csv
 
 
 def test_sweep_summary(tmp_path):

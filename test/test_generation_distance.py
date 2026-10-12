@@ -1,4 +1,4 @@
-from analyze_generation_distance import calculate_distance_accuracy
+from scripts.analysis.analyze_generation_distance import calculate_distance_accuracy
 
 
 def test_distance_accuracy_bins():

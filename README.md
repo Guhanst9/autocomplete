@@ -50,3 +50,5 @@ Use `--decoding-mode greedy` to choose the most probable output each step.
 ## Evaluation
 
 `prepare_test_panel.py` prepares a test panel. `evaluate_models.py` runs the model comparison, and `run_sliding_eval.py` evaluates a checkpoint on genome windows. Run each script with `--help` for options.
+
+One-off analyses, benchmarks, and figure scripts are in `scripts/analysis/`. Run them from the repository root as modules, for example `python -m scripts.analysis.make_final_figures --help`.

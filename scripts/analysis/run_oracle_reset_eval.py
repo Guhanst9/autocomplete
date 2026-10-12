@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from run_decoding_sweep import evenly_spaced_starts
+from scripts.analysis.run_decoding_sweep import evenly_spaced_starts
 from src.dna.checkpoint import load_model
 from src.dna.generation import generate_bases
 

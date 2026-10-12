@@ -8,7 +8,7 @@ from pathlib import Path
 from src.sliding_eval.fasta import find_record_by_accession
 from src.sliding_eval.windows import default_window_starts
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def longest_run(sequence: str) -> int:

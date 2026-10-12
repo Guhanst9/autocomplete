@@ -1,6 +1,6 @@
 import csv
 
-from run_oracle_reset_eval import (
+from scripts.analysis.run_oracle_reset_eval import (
     distance_accuracy,
     load_rows,
     parse_intervals,
